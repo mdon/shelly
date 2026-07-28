@@ -13,15 +13,25 @@ defmodule Shelly.Events do
         handler: fn
           {:status, device_id, status} -> MyApp.handle_status(device_id, status)
           {:online, device_id, online?} -> MyApp.handle_online(device_id, online?)
+          {:other, _message} -> :ok
         end
       )
 
-  `device_id` is normalized to lowercase hex (events arrive hex or
-  decimal depending on generation). `status` is the raw payload for
-  `Shelly.Status.parse/4` — **check `Shelly.Status.has_component?/2`
-  before parsing**: events may be partial deltas (only `sys` or an
-  input changed) and parsing those as full status reports a false
-  "off".
+  `device_id` is normalized to lowercase hex (integer ids arrive on
+  some generations and are hex-converted; string ids pass through).
+  `status` is the raw payload for `Shelly.Status.parse/4` — **guard
+  before parsing**: events may be partial deltas (only `sys`, an input
+  or battery changed), and parsing those as a full status reports a
+  false "off". Check `Shelly.Status.has_component?/2`, and when you
+  know the device's component, prefer comparing
+  `Shelly.Status.component_of/2` against it.
+
+  Reconnection uses in-process exponential backoff with jitter (a
+  WebSockex constraint — the process is unresponsive while it waits)
+  and gives up after #{10} consecutive failures, letting your
+  supervisor's restart policy take over. Note the access token rides
+  the websocket URL (Shelly's protocol); this module never logs the
+  URL and redacts disconnect reasons.
   """
 
   use WebSockex
@@ -64,17 +74,42 @@ defmodule Shelly.Events do
 
   def handle_frame(_frame, state), do: {:ok, state}
 
+  @max_attempts 10
+
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
     attempt = state.attempt + 1
-    backoff = min(attempt * 2_000, 30_000)
 
-    Logger.warning(
-      "Shelly.Events: disconnected (#{state.label}, #{inspect(reason)}) — retry in #{backoff}ms"
-    )
+    if attempt > @max_attempts do
+      Logger.error(
+        "Shelly.Events: giving up after #{@max_attempts} failed reconnects (#{state.label}, #{redact_reason(reason)})"
+      )
 
-    Process.sleep(backoff)
-    {:reconnect, %{state | attempt: attempt}}
+      {:ok, state}
+    else
+      backoff = jittered_backoff(attempt)
+
+      Logger.warning(
+        "Shelly.Events: disconnected (#{state.label}, #{redact_reason(reason)}) — retry #{attempt}/#{@max_attempts} in #{backoff}ms"
+      )
+
+      # WebSockex offers no timer-based reconnect; this blocks only this
+      # socket process. Capped, exponential, jittered.
+      Process.sleep(backoff)
+      {:reconnect, %{state | attempt: attempt}}
+    end
+  end
+
+  # Never log raw disconnect reasons — WebSockex errors can embed the
+  # connection URL, which carries the access token.
+  defp redact_reason(%{__struct__: mod, code: code}), do: "#{inspect(mod)} code=#{inspect(code)}"
+  defp redact_reason(%{__struct__: mod}), do: inspect(mod)
+  defp redact_reason(reason) when is_atom(reason), do: inspect(reason)
+  defp redact_reason(_), do: "connection_error"
+
+  defp jittered_backoff(attempt) do
+    base = min(1_000 * Integer.pow(2, attempt - 1), 30_000)
+    base + :rand.uniform(div(base, 4) + 1)
   end
 
   ## Event routing
@@ -104,7 +139,10 @@ defmodule Shelly.Events do
   defp safe_call(handler, event) do
     handler.(event)
   rescue
-    e -> Logger.error("Shelly.Events handler crashed: #{inspect(e)}")
+    e ->
+      Logger.error(
+        "Shelly.Events handler crashed: " <> Exception.format(:error, e, __STACKTRACE__)
+      )
   end
 
   @doc "Normalize a device id to lowercase hex (events arrive hex or decimal)."

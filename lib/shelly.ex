@@ -37,20 +37,18 @@ defmodule Shelly do
       Shelly.OAuth.authorize_url("https://myapp.example/oauth/callback")
 
       # 3. In your callback:
-      {:ok, %{access_token: token, user_api_url: server}} =
-        Shelly.OAuth.exchange_code(code)
-
-      account = %{server: server, token: token}
+      {:ok, grant} = Shelly.OAuth.exchange_code(code)
+      account = Shelly.OAuth.to_account(grant)
 
       # 4. Devices + live data:
       {:ok, devices} = Shelly.Account.list_devices(account)
       {:ok, statuses} = Shelly.Account.all_statuses(account)
 
-      parsed = Shelly.Status.parse(statuses["0cdc7ef76644"], 0, true)
+      parsed = Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
       # => %{on: true, watts: 2.4, component: "switch", metered: true, ...}
 
       # 5. Control:
-      :ok = Shelly.Account.set_relay(account, "0cdc7ef76644", 0, false)
+      :ok = Shelly.Account.set_switch(account, "0cdc7ef76644", 0, false)
 
   ## Field notes baked into this library
 
@@ -61,6 +59,7 @@ defmodule Shelly do
     * Websocket events can be partial deltas — always guard with
       `Shelly.Status.has_component?/2` before parsing.
     * The v1 API is deprecated by Shelly; v2 accepts the same auth key.
-    * OAuth tokens outlive everything except a password change.
+    * OAuth tokens are long-lived and die on password change; treat
+      expiry as possible anyway and reconnect on auth failures.
   """
 end

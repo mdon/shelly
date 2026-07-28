@@ -1,7 +1,6 @@
 defmodule Shelly.Status do
   @moduledoc """
-  Shared parsing of Shelly device status payloads into the adapter
-  a flat status map — one parser for every transport (legacy v1 API,
+  Parses Shelly device status payloads into a flat status map — one parser for every transport (legacy v1 API,
   v2 API, OAuth account API, websocket events) and every hardware shape:
 
     * **Gen2/3/4 RPC components**, per channel, in resolution order:
@@ -88,23 +87,21 @@ defmodule Shelly.Status do
           parse_gen1_sensor(status, online)
 
         true ->
-          %{
-            on: false,
-            online: online,
-            watts: 0.0,
-            metered: false,
-            component: "unknown",
-            raw: status
-          }
+          unknown_status(status, online)
       end
 
     base
     |> enrich(status)
-    |> Map.merge(extra, fn _k, parsed, from_extra -> from_extra || parsed end)
+    |> Map.merge(extra, fn _k, parsed, from_extra ->
+      if is_nil(from_extra), do: parsed, else: from_extra
+    end)
   end
 
-  def parse(_status, _channel, online, _extra) do
-    %{on: false, online: online, watts: 0.0, metered: false, component: "unknown", raw: %{}}
+  def parse(_status, _channel, online, extra) do
+    unknown_status(%{}, online)
+    |> Map.merge(extra, fn _k, parsed, from_extra ->
+      if is_nil(from_extra), do: parsed, else: from_extra
+    end)
   end
 
   @doc """
@@ -126,7 +123,6 @@ defmodule Shelly.Status do
       is_map(status["temperature:#{channel}"]) or
       is_map(status["humidity:#{channel}"]) or
       is_map(status["voltmeter:#{channel}"]) or
-      is_map(status["devicepower:#{channel}"]) or
       gen1_sensor?(status) or
       gen1_channel_present?(status["relays"], channel) or
       gen1_channel_present?(status["lights"], channel) or
@@ -140,7 +136,13 @@ defmodule Shelly.Status do
   defp gen1_channel_present?(_, _), do: false
 
   @doc ~S|Normalize the v2 API's gen strings ("G1".."G4") to integers.|
-  def gen_to_int("G" <> n), do: String.to_integer(n)
+  def gen_to_int("G" <> rest) do
+    case Integer.parse(rest) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
   def gen_to_int(n) when is_integer(n), do: n
   def gen_to_int(_), do: nil
 
@@ -158,7 +160,7 @@ defmodule Shelly.Status do
       energy_wh: opt_float(get_in(sw, ["aenergy", "total"])),
       temp_c: opt_float(get_in(sw, ["temperature", "tC"])),
       source: opt_string(sw["source"]),
-      metered: Map.has_key?(sw, "apower"),
+      metered: is_number(sw["apower"]),
       component: "switch"
     })
   end
@@ -166,7 +168,7 @@ defmodule Shelly.Status do
   defp parse_cover(status, channel, online) do
     cover = status["cover:#{channel}"]
 
-    rpc_common(status, online)
+    rpc_common(status, online, channel)
     |> Map.merge(%{
       # A cover is "on" while it is anywhere but fully closed — motion
       # and open positions both count; rules/toggles map to open/close.
@@ -177,7 +179,7 @@ defmodule Shelly.Status do
       energy_wh: opt_float(get_in(cover, ["aenergy", "total"])),
       temp_c: opt_float(get_in(cover, ["temperature", "tC"])),
       source: opt_string(cover["source"]),
-      metered: Map.has_key?(cover, "apower"),
+      metered: is_number(cover["apower"]),
       component: "cover"
     })
   end
@@ -194,7 +196,7 @@ defmodule Shelly.Status do
       energy_wh: opt_float(get_in(light, ["aenergy", "total"])),
       temp_c: opt_float(get_in(light, ["temperature", "tC"])),
       source: opt_string(light["source"]),
-      metered: Map.has_key?(light, "apower"),
+      metered: is_number(light["apower"]),
       component: "light"
     })
   end
@@ -211,7 +213,7 @@ defmodule Shelly.Status do
       voltage: opt_float(pm["voltage"]),
       current: opt_float(pm["current"]),
       energy_wh: opt_float(get_in(pm, ["aenergy", "total"])),
-      metered: true,
+      metered: is_number(pm["apower"]),
       component: "pm"
     })
   end
@@ -227,7 +229,7 @@ defmodule Shelly.Status do
       voltage: opt_float(em["voltage"]),
       current: opt_float(em["current"]),
       energy_wh: opt_float(get_in(em, ["aenergy", "total"])),
-      metered: true,
+      metered: is_number(em["act_power"] || em["apower"]),
       component: "em"
     })
   end
@@ -241,7 +243,7 @@ defmodule Shelly.Status do
       on: false,
       watts: to_float(em["total_act_power"]),
       current: opt_float(em["total_current"]),
-      metered: true,
+      metered: is_number(em["total_act_power"]),
       component: "em"
     })
   end
@@ -262,7 +264,7 @@ defmodule Shelly.Status do
       input_state: opt_bool(input["state"]),
       source: nil,
       model: opt_string(status["code"]),
-      gen: 2,
+      gen: nil,
       metered: false,
       component: "unknown",
       raw: status
@@ -282,7 +284,7 @@ defmodule Shelly.Status do
       # Gen1 relay energy counters count Watt-minutes, not Wh.
       energy_wh: watt_minutes_to_wh(meter && meter["total"]),
       source: opt_string(relay["source"]),
-      metered: is_map(meter) and Map.has_key?(meter, "power"),
+      metered: is_number(meter && meter["power"]),
       component: "relay"
     })
   end
@@ -296,7 +298,7 @@ defmodule Shelly.Status do
       on: light["ison"] == true,
       watts: to_float(meter && meter["power"]),
       energy_wh: watt_minutes_to_wh(meter && meter["total"]),
-      metered: is_map(meter) and Map.has_key?(meter, "power"),
+      metered: is_number(meter && meter["power"]),
       component: "light"
     })
   end
@@ -305,11 +307,19 @@ defmodule Shelly.Status do
     roller = Enum.at(status["rollers"] || [], channel) || %{}
     meter = Enum.at(status["meters"] || [], channel)
 
+    position = roller["current_pos"]
+
     gen1_common(status, channel, online)
     |> Map.merge(%{
-      on: roller["state"] in ["open", "opening", "closing"],
+      # Gen1 rollers report "open" | "close" | "stop"; when calibrated,
+      # current_pos (0..100) is the reliable openness signal.
+      on:
+        if(is_number(position) and position >= 0,
+          do: position > 0,
+          else: roller["state"] == "open"
+        ),
       watts: to_float(roller["power"] || (meter && meter["power"])),
-      metered: Map.has_key?(roller, "power") or (is_map(meter) and Map.has_key?(meter, "power")),
+      metered: is_number(roller["power"] || (meter && meter["power"])),
       component: "cover"
     })
   end
@@ -324,7 +334,7 @@ defmodule Shelly.Status do
       voltage: opt_float(emeter["voltage"]),
       # Gen1 emeters count real Wh (unlike relay meters).
       energy_wh: opt_float(emeter["total"]),
-      metered: true,
+      metered: is_number(emeter["power"]),
       component: "em"
     })
   end
@@ -376,7 +386,7 @@ defmodule Shelly.Status do
       current: opt_float(light["current"]),
       energy_wh: opt_float(get_in(light, ["aenergy", "total"])),
       source: opt_string(light["source"]),
-      metered: Map.has_key?(light, "apower"),
+      metered: is_number(light["apower"]),
       component: "light"
     })
   end
@@ -455,6 +465,93 @@ defmodule Shelly.Status do
     |> Map.put(:temp_c, temp)
   end
 
+  @doc """
+  Which component the payload carries for this channel ("switch",
+  "cover", "light", "pm", "em", "relay", "flood", "smoke", "presence",
+  "sensor") or nil when none — use it to guard event deltas against a
+  device's known component before applying `parse/4`.
+  """
+  def component_of(status, channel) when is_map(status) do
+    cond do
+      is_map(status["switch:#{channel}"]) ->
+        "switch"
+
+      is_map(status["cover:#{channel}"]) ->
+        "cover"
+
+      is_map(status["light:#{channel}"]) ->
+        "light"
+
+      light_family_key(status, channel) ->
+        "light"
+
+      is_map(status["pm1:#{channel}"]) ->
+        "pm"
+
+      is_map(status["em1:#{channel}"]) ->
+        "em"
+
+      channel == 0 and is_map(status["em:0"]) ->
+        "em"
+
+      is_map(status["flood:#{channel}"]) ->
+        "flood"
+
+      is_map(status["smoke:#{channel}"]) ->
+        "smoke"
+
+      is_map(status["presence:#{channel}"]) ->
+        "presence"
+
+      is_map(status["temperature:#{channel}"]) or is_map(status["humidity:#{channel}"]) ->
+        "sensor"
+
+      is_map(status["voltmeter:#{channel}"]) ->
+        "sensor"
+
+      is_list(status["relays"]) and length(status["relays"]) > channel ->
+        "relay"
+
+      is_list(status["lights"]) and length(status["lights"]) > channel ->
+        "light"
+
+      is_list(status["rollers"]) and length(status["rollers"]) > channel ->
+        "cover"
+
+      is_list(status["emeters"]) and length(status["emeters"]) > channel ->
+        "em"
+
+      gen1_sensor?(status) ->
+        "sensor"
+
+      true ->
+        nil
+    end
+  end
+
+  def component_of(_status, _channel), do: nil
+
+  defp unknown_status(raw, online) do
+    %{
+      on: false,
+      online: online,
+      watts: 0.0,
+      voltage: nil,
+      current: nil,
+      energy_wh: nil,
+      temp_c: nil,
+      rssi: nil,
+      input_state: nil,
+      source: nil,
+      model: nil,
+      gen: nil,
+      battery: nil,
+      metered: false,
+      component: "unknown",
+      raw: raw
+    }
+  end
+
   ## Small helpers ---------------------------------------------------------
 
   defp watt_minutes_to_wh(n) when is_number(n), do: n / 60.0
@@ -471,16 +568,16 @@ defmodule Shelly.Status do
   defp to_float(n) when is_number(n), do: n * 1.0
   defp to_float(_), do: 0.0
 
-  def opt_float(n) when is_number(n), do: n * 1.0
-  def opt_float(_), do: nil
+  defp opt_float(n) when is_number(n), do: n * 1.0
+  defp opt_float(_), do: nil
 
-  def opt_int(n) when is_integer(n), do: n
-  def opt_int(n) when is_float(n), do: round(n)
-  def opt_int(_), do: nil
+  defp opt_int(n) when is_integer(n), do: n
+  defp opt_int(n) when is_float(n), do: round(n)
+  defp opt_int(_), do: nil
 
-  def opt_bool(b) when is_boolean(b), do: b
-  def opt_bool(_), do: nil
+  defp opt_bool(b) when is_boolean(b), do: b
+  defp opt_bool(_), do: nil
 
-  def opt_string(s) when is_binary(s), do: s
-  def opt_string(_), do: nil
+  defp opt_string(s) when is_binary(s), do: s
+  defp opt_string(_), do: nil
 end

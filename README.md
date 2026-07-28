@@ -19,7 +19,8 @@ end
 ```
 
 Add the rate gate to your supervision tree (the Shelly cloud allows
-~1 request/second/account and 429s bursts):
+~1 request/second/account and 429s bursts; the gate defaults to a
+slightly padded 1.2 s spacing):
 
 ```elixir
 children = [
@@ -35,8 +36,8 @@ children = [
 Shelly.OAuth.authorize_url("https://myapp.example/oauth/callback")
 
 # In your callback, exchange the ?code= param:
-{:ok, %{access_token: token, user_api_url: server}} = Shelly.OAuth.exchange_code(code)
-account = %{server: server, token: token}
+{:ok, grant} = Shelly.OAuth.exchange_code(code)
+account = Shelly.OAuth.to_account(grant)
 
 # Every device on the account — user-given names, models, channel counts:
 {:ok, devices} = Shelly.Account.list_devices(account)
@@ -44,12 +45,12 @@ rows = Shelly.Account.expand_channels(devices)
 
 # Whole-account status in ONE call:
 {:ok, statuses} = Shelly.Account.all_statuses(account)
-parsed = Shelly.Status.parse(statuses["0cdc7ef76644"], 0, true)
+parsed = Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
 # => %{on: true, watts: 2.4, voltage: 230.4, energy_wh: 2265635.7,
 #      temp_c: 55.9, rssi: -66, component: "switch", metered: true, ...}
 
 # Control:
-:ok = Shelly.Account.set_relay(account, "0cdc7ef76644", 0, false)
+:ok = Shelly.Account.set_switch(account, "0cdc7ef76644", 0, false)
 ```
 
 ## Real-time events
@@ -60,8 +61,9 @@ Shelly.Events.start_link(
   token: account.token,
   handler: fn
     {:status, device_id, status} ->
-      # Guard: events may be partial deltas (only sys / an input changed)
-      if Shelly.Status.has_component?(status, 0) do
+      # Guard: events may be partial deltas (only sys/input/battery
+      # changed). When you know the device's component, compare it:
+      if Shelly.Status.component_of(status, 0) == "switch" do
         MyApp.apply(device_id, Shelly.Status.parse(status, 0, true))
       end
 

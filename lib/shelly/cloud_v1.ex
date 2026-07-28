@@ -22,7 +22,7 @@ defmodule Shelly.CloudV1 do
   end
 
   @doc "Switch a relay channel on or off."
-  def set_relay(conn, device_id, channel, on?) when is_boolean(on?) do
+  def set_switch(conn, device_id, channel, on?) when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 
     case post(conn, "/device/relay/control", body) do
@@ -41,8 +41,6 @@ defmodule Shelly.CloudV1 do
         retry: false
       )
     end)
-  rescue
-    e -> {:error, e}
   end
 
   defp error({:ok, %{status: status, body: body}}), do: {:error, {:shelly_http, status, body}}

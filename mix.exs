@@ -24,7 +24,7 @@ defmodule Shelly.MixProject do
 
   defp deps do
     [
-      {:req, "~> 0.4"},
+      {:req, "~> 0.4 or ~> 0.5"},
       {:websockex, "~> 0.4"},
       {:jason, "~> 1.4"},
       {:ex_doc, "~> 0.31", only: :dev, runtime: false}
@@ -49,6 +49,11 @@ defmodule Shelly.MixProject do
   end
 
   defp docs do
-    [main: "Shelly", source_url: @source_url, source_ref: "v#{@version}"]
+    [
+      main: "Shelly",
+      source_url: @source_url,
+      source_ref: "v#{@version}",
+      extras: ["README.md", "CHANGELOG.md"]
+    ]
   end
 end

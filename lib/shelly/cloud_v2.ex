@@ -11,6 +11,9 @@ defmodule Shelly.CloudV2 do
 
   Rate limit: ~1 request/second/account (paced via `Shelly.RateGate`
   when running). Status supports up to 10 devices per call.
+
+  Note: the v2 API takes the auth key as a query parameter (Shelly's
+  design) — be aware that intermediary proxies may log query strings.
   """
 
   @type conn :: %{server: String.t(), auth_key: String.t()}
@@ -24,7 +27,15 @@ defmodule Shelly.CloudV2 do
       Shelly.Status.parse(el["status"], channel, el["online"] in [1, true],
         %{model: el["code"], gen: Shelly.Status.gen_to_int(el["gen"])})
   """
-  def get_statuses(conn, device_ids) when is_list(device_ids) and length(device_ids) <= 10 do
+  def get_statuses(conn, device_ids) when is_list(device_ids) do
+    if length(device_ids) > 10 do
+      {:error, :too_many_ids}
+    else
+      do_get_statuses(conn, device_ids)
+    end
+  end
+
+  defp do_get_statuses(conn, device_ids) do
     body = %{ids: device_ids, select: ["status"]}
 
     case post_json(conn, "/v2/devices/api/get", body) do
@@ -53,7 +64,7 @@ defmodule Shelly.CloudV2 do
   end
 
   @doc "Control a cover: position is \"open\" | \"close\" | \"stop\" | 0..100."
-  def set_cover(conn, device_id, channel, position) do
+  def set_cover(conn, device_id, channel, position, _opts \\ []) do
     body = %{id: device_id, channel: channel, position: position}
 
     case post_json(conn, "/v2/devices/api/set/cover", body) do
@@ -63,7 +74,7 @@ defmodule Shelly.CloudV2 do
   end
 
   @doc "Control a light: opts may include :on, :brightness, :temperature, :toggle_after."
-  def set_light(conn, device_id, channel, opts) do
+  def set_light(conn, device_id, channel, opts \\ []) do
     body =
       opts
       |> Map.new()
@@ -89,8 +100,6 @@ defmodule Shelly.CloudV2 do
         retry: false
       )
     end)
-  rescue
-    e -> {:error, e}
   end
 
   defp error({:ok, %{status: status, body: body}}), do: {:error, {:shelly_http, status, body}}

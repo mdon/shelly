@@ -72,7 +72,7 @@ defmodule Shelly.Account do
   end
 
   @doc "Switch a relay channel on or off."
-  def set_relay(account, device_id, channel, on?) when is_boolean(on?) do
+  def set_switch(account, device_id, channel, on?) when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 
     case post(account, "/device/relay/control", body) do
@@ -81,19 +81,32 @@ defmodule Shelly.Account do
     end
   end
 
+  @doc """
+  Parse one device's `all_statuses/1` entry for a channel — derives
+  online from the payload's cloud connectivity instead of assuming it:
+
+      {:ok, statuses} = Shelly.Account.all_statuses(account)
+      Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
+  """
+  def parse_status(raw_status, channel) when is_map(raw_status) do
+    online = get_in(raw_status, ["cloud", "connected"]) == true
+    Shelly.Status.parse(raw_status, channel, online)
+  end
+
   defp post(account, path, form) do
-    Shelly.RateGate.run({account.server, account.token}, fn ->
-      Req.request(
-        method: :post,
-        url: account.server <> path,
-        headers: [{"Authorization", "Bearer " <> account.token}],
-        form: form,
-        receive_timeout: 15_000,
-        retry: false
-      )
-    end)
-  rescue
-    e -> {:error, e}
+    case Shelly.RateGate.run({account.server, account.token}, fn ->
+           Req.request(
+             method: :post,
+             url: account.server <> path,
+             headers: [{"Authorization", "Bearer " <> account.token}],
+             form: form,
+             receive_timeout: 15_000,
+             retry: false
+           )
+         end) do
+      {:error, :throttled} -> {:error, :throttled}
+      other -> other
+    end
   end
 
   defp error({:ok, %{status: status, body: body}}), do: {:error, {:shelly_http, status, body}}

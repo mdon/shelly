@@ -3,6 +3,12 @@ defmodule Shelly.OAuth do
   Shelly Cloud OAuth (authorization-code) flow — the "connect your
   account" path that replaces auth keys entirely.
 
+  Note: the flow is Shelly's own non-standard variant — there is no
+  `state` parameter for CSRF binding, and the authorization code is
+  itself a JWT whose (unverified) claims name the account's cloud
+  server. Server claims are pinned to `https://*.shelly.cloud` before
+  use.
+
   Flow:
 
     1. Send the user to `authorize_url/2` (their popup shows Shelly's
@@ -66,6 +72,14 @@ defmodule Shelly.OAuth do
     end
   end
 
+  @doc """
+  Convert an `exchange_code/2` result into the account map that
+  `Shelly.Account` and `Shelly.Events` take.
+  """
+  def to_account(%{access_token: token, user_api_url: url}) do
+    %{server: url, token: token}
+  end
+
   @doc "Read a JWT's payload without verification (routing only — do not trust)."
   def peek_jwt(token) when is_binary(token) do
     with [_, payload, _] <- String.split(token, "."),
@@ -91,7 +105,15 @@ defmodule Shelly.OAuth do
     end
   end
 
+  # Claims come from UNVERIFIED JWTs — pin the scheme to https and the
+  # host to *.shelly.cloud before trusting them as a request target.
   defp normalize_url(url) do
-    if String.starts_with?(url, "http"), do: url, else: "https://" <> url
+    uri = URI.parse(if String.contains?(url, "://"), do: url, else: "https://" <> url)
+
+    if is_binary(uri.host) and String.ends_with?(uri.host, ".shelly.cloud") do
+      "https://" <> uri.host
+    else
+      @fallback_server
+    end
   end
 end
