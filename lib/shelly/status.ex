@@ -248,7 +248,7 @@ defmodule Shelly.Status do
     })
   end
 
-  defp rpc_common(status, online, channel \\ 0) do
+  defp rpc_common(status, online, channel) do
     wifi = status["wifi"] || %{}
     input = status["input:#{channel}"] || %{}
 
