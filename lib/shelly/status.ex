@@ -68,9 +68,6 @@ defmodule Shelly.Status do
         is_map(status["voltmeter:#{channel}"]) ->
           parse_voltmeter(status, channel, online)
 
-        is_map(status["devicepower:#{channel}"]) ->
-          parse_rpc_sensor(status, channel, online)
-
         is_list(status["relays"]) ->
           parse_gen1_relay(status, channel, online)
 
