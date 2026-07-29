@@ -1,7 +1,7 @@
 defmodule Shelly.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/mdon/shelly"
 
   def project do
@@ -27,7 +27,10 @@ defmodule Shelly.MixProject do
       {:req, "~> 0.4 or ~> 0.5"},
       {:websockex, "~> 0.4"},
       {:jason, "~> 1.4"},
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
+      # Req's optional plug adapter — lets the OAuth tests answer requests
+      # in-process instead of reaching Shelly's servers.
+      {:plug, "~> 1.16", only: :test}
     ]
   end
 

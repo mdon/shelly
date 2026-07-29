@@ -39,6 +39,12 @@ Shelly.OAuth.authorize_url("https://myapp.example/oauth/callback")
 {:ok, grant} = Shelly.OAuth.exchange_code(code)
 account = Shelly.OAuth.to_account(grant)
 
+# Store grant.expires_at and grant.refresh_token too — an access token
+# lasts 12 hours, after which everything below returns 401. Renew before
+# the deadline with Shelly.OAuth.refresh/2, and treat
+# {:error, :refresh_unsupported} as "send the user through the login
+# again" (auth keys, further down, never expire).
+
 # Every device on the account — user-given names, models, channel counts:
 {:ok, devices} = Shelly.Account.list_devices(account)
 rows = Shelly.Account.expand_channels(devices)

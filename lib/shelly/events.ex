@@ -46,7 +46,7 @@ defmodule Shelly.Events do
     host = URI.parse(server).host || server
     url = "wss://#{host}:6113/shelly/wss/hk_sock?t=#{token}"
 
-    state = %{handler: handler, label: host, attempt: 0}
+    state = %{handler: handler, label: host, attempt: 0, connected_at: nil}
 
     WebSockex.start_link(
       url,
@@ -59,7 +59,12 @@ defmodule Shelly.Events do
   @impl true
   def handle_connect(_conn, state) do
     Logger.info("Shelly.Events: connected (#{state.label})")
-    {:ok, %{state | attempt: 0}}
+    # Don't zero the attempt counter here: an expired token still
+    # completes the websocket handshake and is dropped moments later,
+    # so resetting on connect turns "give up after 10 tries" into an
+    # endless connect/disconnect loop. The counter is cleared in
+    # handle_disconnect/2, but only for sessions that actually held.
+    {:ok, %{state | connected_at: System.monotonic_time(:millisecond)}}
   end
 
   @impl true
@@ -76,9 +81,15 @@ defmodule Shelly.Events do
 
   @max_attempts 10
 
+  # A session that lasted this long counts as genuinely established, so
+  # the next drop starts counting from scratch. Shorter than this and the
+  # connection was refused in all but name (expired token, revoked
+  # account) — those keep incrementing until the cap stops them.
+  @stable_session_ms 60_000
+
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
-    attempt = state.attempt + 1
+    attempt = if stable_session?(state), do: 1, else: state.attempt + 1
 
     if attempt > @max_attempts do
       Logger.error(
@@ -96,8 +107,14 @@ defmodule Shelly.Events do
       # WebSockex offers no timer-based reconnect; this blocks only this
       # socket process. Capped, exponential, jittered.
       Process.sleep(backoff)
-      {:reconnect, %{state | attempt: attempt}}
+      {:reconnect, %{state | attempt: attempt, connected_at: nil}}
     end
+  end
+
+  defp stable_session?(%{connected_at: nil}), do: false
+
+  defp stable_session?(%{connected_at: connected_at}) do
+    System.monotonic_time(:millisecond) - connected_at >= @stable_session_ms
   end
 
   # Never log raw disconnect reasons — WebSockex errors can embed the

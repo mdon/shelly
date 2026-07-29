@@ -1,6 +1,31 @@
 # Changelog
 
-## v0.1.0 (unreleased)
+## v0.2.0
+
+Token lifetime work, driven by a live account going dark: a `shelly-diy`
+access token turned out to last exactly 12 hours (`exp - iat = 43200`),
+after which every HTTP call returns `401 invalid_token` and the
+websocket is closed right after the handshake.
+
+- `Shelly.OAuth.exchange_code/2` now returns `:refresh_token` and
+  `:expires_at` (parsed from the token's `exp` claim) alongside the
+  access token. Previously both were discarded, leaving callers no way
+  to see expiry coming. **Persist them.**
+- `Shelly.OAuth.refresh/2` — best-effort renewal via the conventional
+  `grant_type=refresh_token`. Shelly documents no refresh grant, so a
+  4xx is reported as `{:error, :refresh_unsupported}` and the caller
+  should re-authorize the user (or fall back to an auth key, which does
+  not expire, for polling and control).
+- `Shelly.Events` no longer reconnects forever against a dead token.
+  Resetting the attempt counter in `handle_connect/2` made the cap
+  unreachable whenever the handshake succeeded and the session was
+  dropped immediately; the counter now clears only after a session has
+  held for a minute.
+- Token requests accept extra Req options via
+  `config :shelly, :req_options` (the seam the new tests use).
+- Docs: the module no longer describes the access token as long-lived.
+
+## v0.1.0
 
 Initial release, extracted from NordSwitch (nordswitch.eu) where the
 OAuth/account/v2 paths and switch parsing run against a live mixed
