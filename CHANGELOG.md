@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.1
+
+- **`Shelly.Events` delivered unusable device ids for live status events.**
+  Shelly's websocket sends the device id as the *decimal* rendering of the
+  hex id in a string (`"79530338915136"` for `485519999340`), and
+  `normalize_device_id/1` only converted integers — a binary was merely
+  downcased. Consumers matching that against their device ids found
+  nothing, so every `StatusOnChange` was dropped and realtime silently
+  degraded to whatever polling the caller had. Decimal strings now
+  convert; a 12-character all-digit id is still treated as hex, since
+  that is itself a valid id and only length distinguishes the two.
+
 ## v0.2.0
 
 Token lifetime work, driven by a live account going dark: a `shelly-diy`

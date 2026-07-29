@@ -11,6 +11,21 @@ defmodule Shelly.UnitsTest do
       assert Shelly.Events.normalize_device_id("0CDC7EF76644") == "0cdc7ef76644"
     end
 
+    test "decimal strings convert — the live websocket sends ids this way" do
+      # Same real pair as above, but as the string Shelly actually pushes.
+      # Left unconverted, consumers match nothing and realtime silently
+      # degrades to polling.
+      assert Shelly.Events.normalize_device_id("79530338915136") == "485519999340"
+      assert Shelly.Events.normalize_device_id("14141162481220") == "0cdc7ef76644"
+      assert Shelly.Events.normalize_device_id(" 79530338915136 ") == "485519999340"
+    end
+
+    test "a 12-digit all-numeric id is hex, not decimal" do
+      # "485519999340" is both a valid hex id and a valid number; length
+      # decides, since a real id's decimal form needs 13+ digits.
+      assert Shelly.Events.normalize_device_id("485519999340") == "485519999340"
+    end
+
     test "small integers are zero-padded to mac width" do
       assert Shelly.Events.normalize_device_id(255) == "0000000000ff"
     end

@@ -162,14 +162,40 @@ defmodule Shelly.Events do
       )
   end
 
-  @doc "Normalize a device id to lowercase hex (events arrive hex or decimal)."
-  def normalize_device_id(id) when is_binary(id), do: String.downcase(id)
+  @doc """
+  Normalize a device id to the lowercase 12-hex-digit form devices are
+  addressed by (`"485519999340"`), whatever shape the event carried.
+
+  Shelly sends the id three ways: as that hex string, as an integer, and
+  — on the live websocket — as the *decimal* rendering of the same
+  number in a string (`"79530338915136"`). The decimal string is the
+  trap: it looks like an id, so a consumer matching it against device ids
+  finds nothing and silently falls back to polling.
+
+  Disambiguation is by length, because a 12-character all-digit string is
+  itself a valid hex id (`"485519999340"`). A real id occupies 12 hex
+  digits, whose decimal rendering needs 13 or more, so digits-only and
+  longer than 12 means decimal.
+  """
+  def normalize_device_id(id) when is_binary(id) do
+    id = String.trim(id)
+
+    if decimal_form?(id) do
+      id |> String.to_integer() |> normalize_device_id()
+    else
+      String.downcase(id)
+    end
+  end
 
   def normalize_device_id(id) when is_integer(id) do
     id |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(12, "0")
   end
 
   def normalize_device_id(_), do: nil
+
+  defp decimal_form?(id) do
+    String.length(id) > 12 and String.match?(id, ~r/^\d+$/)
+  end
 
   defp device_id(message) do
     normalize_device_id(
