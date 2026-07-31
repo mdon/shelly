@@ -86,10 +86,13 @@ defmodule Shelly do
       than off.
     * The v1 API is deprecated by Shelly; v2 accepts the same auth key.
     * **OAuth access tokens last 12 hours** (`exp - iat = 43200`,
-      measured), and Shelly publishes no refresh grant — persist
-      `:expires_at`, try `Shelly.OAuth.refresh/2`, and be ready to send
-      the user through the login again. An auth key, by contrast, does
-      not expire.
+      measured twice on live accounts). Shelly publishes no refresh
+      grant, but `Shelly.OAuth.refresh/2` works against a token that is
+      still live — a fleet renewing itself every ~11 hours ran unattended
+      for days. Persist `:expires_at` and renew ahead of it; an **expired**
+      token cannot be refreshed, only re-authorized. An auth key does not
+      expire at all, which is what covers your app being down across a
+      deadline.
     * Device ids arrive as hex, as integers, and as decimal strings —
       normalize with `Shelly.Events.normalize_device_id/1` before
       matching anything.

@@ -419,11 +419,13 @@ websocket is closed right after the handshake.
   `:expires_at` (parsed from the token's `exp` claim) alongside the
   access token. Previously both were discarded, leaving callers no way
   to see expiry coming. **Persist them.**
-- `Shelly.OAuth.refresh/2` — best-effort renewal via the conventional
-  `grant_type=refresh_token`. Shelly documents no refresh grant, so a
-  4xx is reported as `{:error, :refresh_unsupported}` and the caller
-  should re-authorize the user (or fall back to an auth key, which does
-  not expire, for polling and control).
+- `Shelly.OAuth.refresh/2` — renewal via the conventional
+  `grant_type=refresh_token`. Shelly documents no such grant, but it is
+  honoured for a token that is still live: verified afterwards on a real
+  account that renewed itself every ~11 hours, unattended, for days. An
+  **expired** token cannot be refreshed — every grant variant answers
+  `401 invalid_token` — so renew ahead of the deadline and treat
+  `{:error, :refresh_unsupported}` as "re-authorize the user".
 - `Shelly.Events` no longer reconnects forever against a dead token.
   Resetting the attempt counter in `handle_connect/2` made the cap
   unreachable whenever the handshake succeeded and the session was

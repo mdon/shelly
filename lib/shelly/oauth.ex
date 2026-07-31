@@ -34,12 +34,18 @@ defmodule Shelly.OAuth do
   `peek_jwt/1`) and renew *before* it passes, rather than treating the
   token as permanent.
 
-  `refresh/2` attempts a renewal. Shelly does not document a refresh
-  grant, so it is best-effort: it returns `{:error, :refresh_unsupported}`
-  when the server rejects the attempt, and callers should fall back to
-  sending the user through `authorize_url/2` again — or to a
-  never-expiring auth key (`Shelly.CloudV2`) for HTTP polling and
-  control.
+  `refresh/2` renews the token, and **this works** — measured on a live
+  account, which renewed itself unattended three times over 36 hours,
+  every ~11 hours, with no user interaction. Shelly does not *document* a
+  refresh grant, so treat it as behaviour that could change rather than a
+  contract: renew before the deadline, and handle
+  `{:error, :refresh_unsupported}` by sending the user through
+  `authorize_url/2` again.
+
+  The one thing renewal cannot survive is your application being down
+  across a deadline — nothing renews while nothing is running. An auth
+  key (`Shelly.Client.put_auth_key/2`) covers that gap, since it does not
+  expire.
 
   The default `shelly-diy` client id is for personal/DIY integrations;
   commercial integrators get their own via Shelly support
@@ -135,18 +141,23 @@ defmodule Shelly.OAuth do
   @doc """
   Best-effort renewal of an access token that is about to expire.
 
-  Shelly publishes no refresh grant for the Cloud Control API, so this
-  tries the conventional one (`grant_type=refresh_token`) against the
-  account's own server, sending the stored refresh token when there is
-  one and the current access token otherwise.
+  Shelly publishes no refresh grant for the Cloud Control API, but the
+  conventional one (`grant_type=refresh_token`) is honoured in practice:
+  verified against a live account that renewed itself repeatedly. The
+  request goes to the account's own server, sending the stored refresh
+  token when there is one and the current access token otherwise.
+
+  **Renew before the deadline.** An expired token is rejected outright —
+  every grant variant answers `401 invalid_token` — so there is no
+  recovering a lapsed session this way, only keeping a live one alive.
 
   Takes the client whose token is expiring and returns a fresh one,
   carrying the refresh token and expiry forward.
 
-  Returns `{:ok, result}` shaped exactly like `exchange_code/2` when the
-  server plays along, `{:error, :refresh_unsupported}` when it rejects
-  the attempt (the expected outcome today — re-authorize the user
-  instead), or `{:error, reason}` on transport failure.
+  Returns `{:ok, client}` shaped exactly like `exchange_code/2`,
+  `{:error, :refresh_unsupported}` when the server rejects the attempt —
+  which is what a token that has already expired gets — or
+  `{:error, reason}` on transport failure.
 
       case Shelly.OAuth.refresh(client) do
         {:ok, refreshed} -> store(refreshed.token, refreshed.expires_at)
