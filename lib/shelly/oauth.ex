@@ -42,6 +42,8 @@ defmodule Shelly.OAuth do
   (support@shelly.cloud).
   """
 
+  require Logger
+
   @default_client_id "shelly-diy"
   @login_url "https://my.shelly.cloud/oauth_login.html"
   @fallback_server "https://shelly-1-eu.shelly.cloud"
@@ -68,14 +70,12 @@ defmodule Shelly.OAuth do
     server = server_from_jwt(code) || @fallback_server
 
     result =
-      Req.request(
-        [
-          method: :post,
-          url: server <> "/oauth/auth",
-          form: [grant_type: "code", code: code, client_id: client_id],
-          receive_timeout: 15_000,
-          retry: false
-        ] ++ req_options()
+      Shelly.HTTP.request(
+        method: :post,
+        url: server <> "/oauth/auth",
+        form: [grant_type: "code", code: code, client_id: client_id],
+        receive_timeout: 15_000,
+        retry: false
       )
 
     with {:ok, %{status: 200, body: body}} <- result,
@@ -116,14 +116,15 @@ defmodule Shelly.OAuth do
     refresh_token = Map.get(account, :refresh_token) || token
 
     result =
-      Req.request(
+      Shelly.HTTP.request(
         [
           method: :post,
           url: server <> "/oauth/auth",
           form: [grant_type: "refresh_token", refresh_token: refresh_token, client_id: client_id],
           receive_timeout: 15_000,
           retry: false
-        ] ++ req_options()
+        ],
+        account
       )
 
     case result do
@@ -132,6 +133,12 @@ defmodule Shelly.OAuth do
           new_token when is_binary(new_token) -> {:ok, token_result(new_token, body, server)}
           nil -> {:error, :refresh_unsupported}
         end
+
+      # 429 and 408 mean "later", not "never" — reporting them as
+      # unsupported would send the caller to re-authorize a grant that
+      # is still perfectly good.
+      {:ok, %{status: status, body: body}} when status in [408, 429] ->
+        {:error, {:oauth_http, status, body}}
 
       {:ok, %{status: status}} when status in 400..499 ->
         {:error, :refresh_unsupported}
@@ -170,10 +177,19 @@ defmodule Shelly.OAuth do
 
   @doc """
   Convert an `exchange_code/2` result into the account map that
-  `Shelly.Account` and `Shelly.Events` take.
+  `Shelly.Account`, `Shelly.Events` and `refresh/2` take.
+
+  Carries the refresh token and expiry through: `refresh/2` reads
+  `:refresh_token` from this map, and dropping it here meant the
+  documented path quietly sent the *access* token as the refresh token.
   """
-  def to_account(%{access_token: token, user_api_url: url}) do
-    %{server: url, token: token}
+  def to_account(%{access_token: token, user_api_url: url} = grant) do
+    %{
+      server: url,
+      token: token,
+      refresh_token: Map.get(grant, :refresh_token),
+      expires_at: Map.get(grant, :expires_at)
+    }
   end
 
   @doc "Read a JWT's payload without verification (routing only — do not trust)."
@@ -188,11 +204,6 @@ defmodule Shelly.OAuth do
   end
 
   def peek_jwt(_), do: nil
-
-  # Extra options merged into every token request. Exists so tests can
-  # pass a `:plug` stub instead of reaching the network; also a hook for
-  # consumers that need a proxy or custom timeouts.
-  defp req_options, do: Application.get_env(:shelly, :req_options, [])
 
   defp extract_refresh_token(%{"refresh_token" => t}) when is_binary(t), do: t
   defp extract_refresh_token(%{"data" => %{"refresh_token" => t}}) when is_binary(t), do: t
@@ -212,13 +223,22 @@ defmodule Shelly.OAuth do
 
   # Claims come from UNVERIFIED JWTs — pin the scheme to https and the
   # host to *.shelly.cloud before trusting them as a request target.
-  defp normalize_url(url) do
+  # Hosts are matched case-insensitively (DNS is), and a non-string claim
+  # returns the fallback instead of raising inside the grant. The suffix
+  # check is deliberately on the parsed host, so userinfo tricks
+  # ("https://evil.shelly.cloud@example.com") resolve to example.com and
+  # fail closed.
+  defp normalize_url(url) when is_binary(url) do
     uri = URI.parse(if String.contains?(url, "://"), do: url, else: "https://" <> url)
+    host = if is_binary(uri.host), do: String.downcase(uri.host)
 
-    if is_binary(uri.host) and String.ends_with?(uri.host, ".shelly.cloud") do
-      "https://" <> uri.host
+    if is_binary(host) and String.ends_with?(host, ".shelly.cloud") do
+      "https://" <> host
     else
+      Logger.debug(fn -> "Shelly.OAuth: server claim #{inspect(url)} is not a Shelly host" end)
       @fallback_server
     end
   end
+
+  defp normalize_url(_url), do: @fallback_server
 end

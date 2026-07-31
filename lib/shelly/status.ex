@@ -68,16 +68,16 @@ defmodule Shelly.Status do
         is_map(status["voltmeter:#{channel}"]) ->
           parse_voltmeter(status, channel, online)
 
-        is_list(status["relays"]) ->
+        gen1_channel_present?(status["relays"], channel) ->
           parse_gen1_relay(status, channel, online)
 
-        is_list(status["lights"]) ->
+        gen1_channel_present?(status["lights"], channel) ->
           parse_gen1_light(status, channel, online)
 
-        is_list(status["rollers"]) ->
+        gen1_channel_present?(status["rollers"], channel) ->
           parse_gen1_roller(status, channel, online)
 
-        is_list(status["emeters"]) ->
+        gen1_channel_present?(status["emeters"], channel) ->
           parse_gen1_emeter(status, channel, online)
 
         gen1_sensor?(status) ->
@@ -88,7 +88,7 @@ defmodule Shelly.Status do
       end
 
     base
-    |> enrich(status)
+    |> enrich(status, channel)
     |> Map.merge(extra, fn _k, parsed, from_extra ->
       if is_nil(from_extra), do: parsed, else: from_extra
     end)
@@ -150,7 +150,7 @@ defmodule Shelly.Status do
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
-      on: sw["output"] == true,
+      on: output_state(sw["output"]),
       watts: to_float(sw["apower"]),
       voltage: opt_float(sw["voltage"]),
       current: opt_float(sw["current"]),
@@ -167,9 +167,7 @@ defmodule Shelly.Status do
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
-      # A cover is "on" while it is anywhere but fully closed — motion
-      # and open positions both count; rules/toggles map to open/close.
-      on: cover["state"] not in ["closed", nil],
+      on: cover_state(cover),
       watts: to_float(cover["apower"]),
       voltage: opt_float(cover["voltage"]),
       current: opt_float(cover["current"]),
@@ -186,7 +184,7 @@ defmodule Shelly.Status do
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
-      on: light["output"] == true,
+      on: output_state(light["output"]),
       watts: to_float(light["apower"]),
       voltage: opt_float(light["voltage"]),
       current: opt_float(light["current"]),
@@ -225,7 +223,9 @@ defmodule Shelly.Status do
       watts: to_float(em["act_power"] || em["apower"]),
       voltage: opt_float(em["voltage"]),
       current: opt_float(em["current"]),
-      energy_wh: opt_float(get_in(em, ["aenergy", "total"])),
+      energy_wh:
+        opt_float(get_in(em, ["aenergy", "total"])) ||
+          opt_float(get_in(status, ["em1data:#{channel}", "total_act_energy"])),
       metered: is_number(em["act_power"] || em["apower"]),
       component: "em"
     })
@@ -240,6 +240,7 @@ defmodule Shelly.Status do
       on: false,
       watts: to_float(em["total_act_power"]),
       current: opt_float(em["total_current"]),
+      energy_wh: opt_float(get_in(status, ["emdata:0", "total_act"])),
       metered: is_number(em["total_act_power"]),
       component: "em"
     })
@@ -268,15 +269,40 @@ defmodule Shelly.Status do
     }
   end
 
+  # A component can arrive without its state key: websocket deltas carry
+  # only what changed, so `%{"switch:0" => %{"apower" => 15.0}}` says
+  # nothing about the relay. `nil` means "unknown" — synthesizing `false`
+  # here told callers a running boiler was off.
+  defp output_state(true), do: true
+  defp output_state(false), do: false
+  defp output_state(_absent), do: nil
+
+  # Position is the honest signal when the cover reports one: "stopped"
+  # covers both a cover halted mid-travel and an uncalibrated one that
+  # says "stopped" forever. Falls back to the state vocabulary.
+  defp cover_state(cover) do
+    case numeric(cover["current_pos"]) do
+      position when is_number(position) ->
+        position > 0
+
+      _ ->
+        case cover["state"] do
+          nil -> nil
+          "closed" -> false
+          _ -> true
+        end
+    end
+  end
+
   ## Gen1 arrays -----------------------------------------------------------
 
   defp parse_gen1_relay(status, channel, online) do
     relay = Enum.at(status["relays"] || [], channel) || %{}
-    meter = Enum.at(status["meters"] || [], channel)
+    meter = gen1_meter(status["meters"], channel)
 
     gen1_common(status, channel, online)
     |> Map.merge(%{
-      on: relay["ison"] == true,
+      on: output_state(relay["ison"]),
       watts: to_float(meter && meter["power"]),
       # Gen1 relay energy counters count Watt-minutes, not Wh.
       energy_wh: watt_minutes_to_wh(meter && meter["total"]),
@@ -288,11 +314,11 @@ defmodule Shelly.Status do
 
   defp parse_gen1_light(status, channel, online) do
     light = Enum.at(status["lights"] || [], channel) || %{}
-    meter = Enum.at(status["meters"] || [], channel)
+    meter = gen1_meter(status["meters"], channel)
 
     gen1_common(status, channel, online)
     |> Map.merge(%{
-      on: light["ison"] == true,
+      on: output_state(light["ison"]),
       watts: to_float(meter && meter["power"]),
       energy_wh: watt_minutes_to_wh(meter && meter["total"]),
       metered: is_number(meter && meter["power"]),
@@ -302,7 +328,7 @@ defmodule Shelly.Status do
 
   defp parse_gen1_roller(status, channel, online) do
     roller = Enum.at(status["rollers"] || [], channel) || %{}
-    meter = Enum.at(status["meters"] || [], channel)
+    meter = gen1_meter(status["meters"], channel)
 
     position = roller["current_pos"]
 
@@ -316,6 +342,7 @@ defmodule Shelly.Status do
           else: roller["state"] == "open"
         ),
       watts: to_float(roller["power"] || (meter && meter["power"])),
+      energy_wh: watt_minutes_to_wh(meter && meter["total"]),
       metered: is_number(roller["power"] || (meter && meter["power"])),
       component: "cover"
     })
@@ -335,6 +362,17 @@ defmodule Shelly.Status do
       component: "em"
     })
   end
+
+  # The original Shelly 2 drives two relays through a single meter, so a
+  # lone meter covers whichever channel asked for it.
+  defp gen1_meter(meters, channel) when is_list(meters) do
+    case Enum.at(meters, channel) do
+      nil -> if length(meters) == 1, do: List.first(meters)
+      meter -> meter
+    end
+  end
+
+  defp gen1_meter(_meters, _channel), do: nil
 
   defp gen1_common(status, channel, online) do
     wifi = status["wifi_sta"] || %{}
@@ -377,7 +415,7 @@ defmodule Shelly.Status do
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
-      on: light["output"] == true,
+      on: output_state(light["output"]),
       watts: to_float(light["apower"]),
       voltage: opt_float(light["voltage"]),
       current: opt_float(light["current"]),
@@ -424,6 +462,7 @@ defmodule Shelly.Status do
   # tmp/hum/bat/alarm keys and no actuator arrays.
   defp gen1_sensor?(status) when is_map(status) do
     (is_map(status["tmp"]) or is_map(status["hum"]) or is_map(status["bat"]) or
+       is_map(status["sensor"]) or
        is_boolean(status["flood"]) or is_boolean(status["smoke"]) or is_boolean(status["motion"])) and
       not is_list(status["relays"]) and not is_list(status["lights"]) and
       not is_list(status["rollers"]) and not is_list(status["emeters"])
@@ -432,34 +471,60 @@ defmodule Shelly.Status do
   defp gen1_sensor?(_), do: false
 
   defp parse_gen1_sensor(status, online) do
-    {on, component} =
+    on =
       cond do
-        is_boolean(status["flood"]) -> {status["flood"], "flood"}
-        is_boolean(status["smoke"]) -> {status["smoke"], "smoke"}
-        is_boolean(status["motion"]) -> {status["motion"], "presence"}
-        true -> {false, "sensor"}
+        is_boolean(status["flood"]) -> status["flood"]
+        is_boolean(status["smoke"]) -> status["smoke"]
+        is_boolean(status["motion"]) -> status["motion"]
+        # Door/Window reports state under `sensor`. Without this an open
+        # door read as closed, because the catch-all said false.
+        is_map(status["sensor"]) -> gen1_contact_open?(status["sensor"])
+        true -> nil
       end
 
     gen1_common(status, 0, online)
-    |> Map.merge(%{on: on, component: component})
+    |> Map.merge(%{on: on, component: gen1_sensor_component(status)})
   end
+
+  defp gen1_sensor_component(status) do
+    cond do
+      is_boolean(status["flood"]) -> "flood"
+      is_boolean(status["smoke"]) -> "smoke"
+      is_boolean(status["motion"]) -> "presence"
+      true -> "sensor"
+    end
+  end
+
+  # Door/Window: `state` is "open"/"close", older units report `is_valid`
+  # alongside. Anything unrecognized stays unknown rather than "closed".
+  defp gen1_contact_open?(%{"state" => "open"}), do: true
+  defp gen1_contact_open?(%{"state" => state}) when state in ["close", "closed"], do: false
+  defp gen1_contact_open?(_sensor), do: nil
 
   # Cross-cutting fields that ride ALONGSIDE the main component:
   # battery (devicepower / gen1 bat) and sensor temperature when the
   # component itself carried none.
-  defp enrich(parsed, status) do
+  defp enrich(parsed, status, channel) do
     battery =
-      opt_int(get_in(status, ["devicepower:0", "battery", "percent"])) ||
+      opt_int(get_in(status, ["devicepower:#{channel}", "battery", "percent"])) ||
+        opt_int(get_in(status, ["devicepower:0", "battery", "percent"])) ||
         opt_int(get_in(status, ["bat", "value"]))
 
     temp =
       parsed[:temp_c] ||
+        opt_float(get_in(status, ["temperature:#{channel}", "tC"])) ||
         opt_float(get_in(status, ["temperature:0", "tC"])) ||
         opt_float(get_in(status, ["tmp", "tC"]))
+
+    humidity =
+      opt_float(get_in(status, ["humidity:#{channel}", "rh"])) ||
+        opt_float(get_in(status, ["humidity:0", "rh"])) ||
+        opt_float(get_in(status, ["hum", "value"]))
 
     parsed
     |> Map.put(:battery, battery)
     |> Map.put(:temp_c, temp)
+    |> Map.put(:humidity, humidity)
   end
 
   @doc """
@@ -519,7 +584,10 @@ defmodule Shelly.Status do
         "em"
 
       gen1_sensor?(status) ->
-        "sensor"
+        # Must agree with parse/4, which names the specific alarm: a
+        # caller that stores the parsed component and guards later
+        # events with this function would otherwise drop all of them.
+        gen1_sensor_component(status)
 
       true ->
         nil
@@ -544,6 +612,7 @@ defmodule Shelly.Status do
       gen: nil,
       battery: nil,
       metered: false,
+      humidity: nil,
       component: "unknown",
       raw: raw
     }

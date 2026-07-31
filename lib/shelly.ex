@@ -9,7 +9,8 @@ defmodule Shelly do
   ## The pieces
 
     * `Shelly.OAuth` — "connect your Shelly account" authorization-code
-      flow; yields a long-lived token and the account's cloud server.
+      flow; yields an access token (**12 hours**), its expiry, and the
+      account's cloud server.
     * `Shelly.Account` — token-authorized account API: list all devices
       (names, models, channels), whole-account status in one call,
       relay control. **The recommended path** — no auth keys.
@@ -56,10 +57,20 @@ defmodule Shelly do
       concurrent bursts — hence `Shelly.RateGate`.
     * Gen1 relay energy counters count **Watt-minutes**; Gen1 emeters
       count real Wh. `Shelly.Status` converts appropriately.
-    * Websocket events can be partial deltas — always guard with
-      `Shelly.Status.has_component?/2` before parsing.
+    * Websocket events can be partial deltas — guard with
+      `Shelly.Status.has_component?/2` (or compare
+      `Shelly.Status.component_of/2` against the device's known
+      component) before parsing. A component can also arrive without its
+      state key, in which case `:on` is `nil`, meaning *unknown* rather
+      than off.
     * The v1 API is deprecated by Shelly; v2 accepts the same auth key.
-    * OAuth tokens are long-lived and die on password change; treat
-      expiry as possible anyway and reconnect on auth failures.
+    * **OAuth access tokens last 12 hours** (`exp - iat = 43200`,
+      measured), and Shelly publishes no refresh grant — persist
+      `:expires_at`, try `Shelly.OAuth.refresh/2`, and be ready to send
+      the user through the login again. An auth key, by contrast, does
+      not expire.
+    * Device ids arrive as hex, as integers, and as decimal strings —
+      normalize with `Shelly.Events.normalize_device_id/1` before
+      matching anything.
   """
 end

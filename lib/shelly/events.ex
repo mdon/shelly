@@ -17,8 +17,9 @@ defmodule Shelly.Events do
         end
       )
 
-  `device_id` is normalized to lowercase hex (integer ids arrive on
-  some generations and are hex-converted; string ids pass through).
+  `device_id` is normalized to lowercase hex — ids arrive as hex, as
+  integers, or as decimal strings, and all three resolve to one form
+  (see `normalize_device_id/1`).
   `status` is the raw payload for `Shelly.Status.parse/4` — **guard
   before parsing**: events may be partial deltas (only `sys`, an input
   or battery changed), and parsing those as a full status reports a
@@ -48,13 +49,20 @@ defmodule Shelly.Events do
 
     state = %{handler: handler, label: host, attempt: 0, connected_at: nil}
 
-    WebSockex.start_link(
-      url,
+    url
+    |> WebSockex.start_link(
       __MODULE__,
       state,
       Keyword.take(opts, [:name]) ++ [handle_initial_conn_failure: true]
     )
+    |> sanitize_start_error()
   end
+
+  # The connection URL carries the access token (Shelly's protocol), and
+  # WebSockex.URLError embeds the URL it was given. Returning that
+  # verbatim puts a live token into whatever the caller logs.
+  defp sanitize_start_error({:error, %WebSockex.URLError{}}), do: {:error, :invalid_server_url}
+  defp sanitize_start_error(result), do: result
 
   @impl true
   def handle_connect(_conn, state) do
@@ -136,22 +144,59 @@ defmodule Shelly.Events do
          %{} = status <- message["status"] do
       safe_call(state.handler, {:status, id, status})
     else
-      _ -> :ok
+      _ -> dropped("StatusOnChange", message, state)
     end
   end
 
   defp dispatch(%{"event" => "Shelly:Online"} = message, state) do
-    with id when is_binary(id) <- device_id(message) do
-      online =
-        message["online"] in [1, true] or get_in(message, ["device", "online"]) in [1, true]
-
+    with id when is_binary(id) <- device_id(message),
+         online when is_boolean(online) <- online_flag(message) do
       safe_call(state.handler, {:online, id, online})
     else
-      _ -> :ok
+      _ -> dropped("Online", message, state)
     end
   end
 
   defp dispatch(message, state), do: safe_call(state.handler, {:other, message})
+
+  # An Online event with no readable flag used to be reported as
+  # offline — a missing field is not evidence that a device is down.
+  defp online_flag(message) do
+    cond do
+      message["online"] in [1, true] -> true
+      message["online"] in [0, false] -> false
+      get_in(message, ["device", "online"]) in [1, true] -> true
+      get_in(message, ["device", "online"]) in [0, false] -> false
+      true -> nil
+    end
+  end
+
+  # Anything unhandled leaves a trace. Silence here is what let a
+  # mis-shaped device id disable realtime without a single log line.
+  defp dropped(kind, message, state) do
+    Logger.debug(fn ->
+      "Shelly.Events: dropped #{kind} (#{state.label}) — " <>
+        "id=#{inspect(raw_device_id(message))} keys=#{inspect(Map.keys(message))}"
+    end)
+
+    :ok
+  end
+
+  defp device_id(message), do: normalize_device_id(raw_device_id(message))
+
+  # A scalar "device" value used to raise inside get_in/2 — outside
+  # safe_call's rescue, so it killed the socket process.
+  defp raw_device_id(message) when is_map(message) do
+    from_device =
+      case message["device"] do
+        %{"id" => id} -> id
+        _ -> nil
+      end
+
+    from_device || message["deviceId"] || message["device_id"]
+  end
+
+  defp raw_device_id(_message), do: nil
 
   defp safe_call(handler, event) do
     handler.(event)
@@ -163,20 +208,29 @@ defmodule Shelly.Events do
   end
 
   @doc """
-  Normalize a device id to the lowercase 12-hex-digit form devices are
-  addressed by (`"485519999340"`), whatever shape the event carried.
+  Normalize a device id to the lowercase hex form devices are addressed
+  by, whatever shape the event carried.
 
-  Shelly sends the id three ways: as that hex string, as an integer, and
-  — on the live websocket — as the *decimal* rendering of the same
-  number in a string (`"79530338915136"`). The decimal string is the
-  trap: it looks like an id, so a consumer matching it against device ids
-  finds nothing and silently falls back to polling.
+  Shelly sends the same id three ways: as hex (`"485519999340"`), as an
+  integer, and — on the live websocket — as the *decimal* rendering of
+  that number in a string (`"79530338915136"`). The decimal string is
+  the trap: it looks like an id, so a consumer matching it against its
+  device list finds nothing, every event is dropped, and realtime
+  silently degrades to whatever polling exists.
 
-  Disambiguation is by length, because a 12-character all-digit string is
-  itself a valid hex id (`"485519999340"`). A real id occupies 12 hex
-  digits, whose decimal rendering needs 13 or more, so digits-only and
-  longer than 12 means decimal.
+  Shelly's spec pins the hex form to **6 characters (Gen1) or 12**,
+  zero-padded. That is what disambiguates: an all-digit string of any
+  other length cannot be a valid hex id, so it is decimal. `"12133370"`
+  (8 digits) is decimal for the Gen1 id `"b923fa"`, while the 12-digit
+  `"485519999340"` is itself hex and passes through.
+
+  Converted ids are padded back to the same 6-or-12 width, so an event
+  carrying the integer and one carrying the string resolve to one key.
+  Ids that aren't hex at all (the `X`-prefixed BLE/Z-Wave form) are
+  downcased and returned as-is.
   """
+  @hex_id_widths [6, 12]
+
   def normalize_device_id(id) when is_binary(id) do
     id = String.trim(id)
 
@@ -187,19 +241,19 @@ defmodule Shelly.Events do
     end
   end
 
-  def normalize_device_id(id) when is_integer(id) do
-    id |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(12, "0")
+  def normalize_device_id(id) when is_integer(id) and id >= 0 do
+    hex = id |> Integer.to_string(16) |> String.downcase()
+
+    case Enum.find(@hex_id_widths, &(String.length(hex) <= &1)) do
+      nil -> hex
+      width -> String.pad_leading(hex, width, "0")
+    end
   end
 
   def normalize_device_id(_), do: nil
 
+  # All digits, but not a length a hex id is allowed to have.
   defp decimal_form?(id) do
-    String.length(id) > 12 and String.match?(id, ~r/^\d+$/)
-  end
-
-  defp device_id(message) do
-    normalize_device_id(
-      get_in(message, ["device", "id"]) || message["deviceId"] || message["device_id"]
-    )
+    String.match?(id, ~r/^\d+$/) and String.length(id) not in @hex_id_widths
   end
 end

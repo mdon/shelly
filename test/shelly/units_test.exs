@@ -26,8 +26,38 @@ defmodule Shelly.UnitsTest do
       assert Shelly.Events.normalize_device_id("485519999340") == "485519999340"
     end
 
-    test "small integers are zero-padded to mac width" do
-      assert Shelly.Events.normalize_device_id(255) == "0000000000ff"
+    test "ids pad to the width Shelly documents: 6 for Gen1, 12 otherwise" do
+      # The spec pins hex ids to 6 or 12 characters, zero-padded. Padding
+      # everything to 12 gave one Gen1 device two keys — "000000b923fa"
+      # from an integer event, "b923fa" from a string one.
+      assert Shelly.Events.normalize_device_id(255) == "0000ff"
+      assert Shelly.Events.normalize_device_id(0xB923FA) == "b923fa"
+      assert Shelly.Events.normalize_device_id(0x485519999340) == "485519999340"
+    end
+
+    test "Gen1 decimal strings convert — 8 digits, so a >12 rule misses them" do
+      # 0xb923fa renders as "12133370". This is the half of the decimal-id
+      # bug that 0.2.1's first attempt left in place.
+      assert Shelly.Events.normalize_device_id("12133370") == "b923fa"
+
+      assert Shelly.Events.normalize_device_id("12133370") ==
+               Shelly.Events.normalize_device_id(0xB923FA)
+    end
+
+    test "the integer and string forms of one id agree" do
+      for id <- [0xB923FA, 0x485519999340, 0x0CDC7EF76644] do
+        from_integer = Shelly.Events.normalize_device_id(id)
+        from_decimal_string = Shelly.Events.normalize_device_id(Integer.to_string(id))
+        assert from_integer == from_decimal_string
+      end
+    end
+
+    test "a 6-character all-digit string is a Gen1 hex id, not decimal" do
+      assert Shelly.Events.normalize_device_id("123456") == "123456"
+    end
+
+    test "non-hex ids (BLE/Z-Wave X-prefixed) pass through downcased" do
+      assert Shelly.Events.normalize_device_id("XAABBCCDDEEFF") == "xaabbccddeeff"
     end
 
     test "garbage returns nil" do
@@ -55,7 +85,31 @@ defmodule Shelly.UnitsTest do
 
     test "to_account bridges the exchange result shape" do
       grant = %{access_token: "tok", user_api_url: "https://s.shelly.cloud", label: "x"}
-      assert Shelly.OAuth.to_account(grant) == %{server: "https://s.shelly.cloud", token: "tok"}
+
+      assert Shelly.OAuth.to_account(grant) == %{
+               server: "https://s.shelly.cloud",
+               token: "tok",
+               refresh_token: nil,
+               expires_at: nil
+             }
+    end
+
+    test "to_account carries the refresh token and expiry refresh/2 needs" do
+      # Dropping these made the documented refresh path send the access
+      # token as the refresh token.
+      expires_at = DateTime.from_unix!(1_785_307_752)
+
+      grant = %{
+        access_token: "tok",
+        user_api_url: "https://s.shelly.cloud",
+        refresh_token: "refresh-me",
+        expires_at: expires_at,
+        label: "someone@example.com"
+      }
+
+      account = Shelly.OAuth.to_account(grant)
+      assert account.refresh_token == "refresh-me"
+      assert account.expires_at == expires_at
     end
   end
 

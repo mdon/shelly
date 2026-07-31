@@ -56,20 +56,30 @@ defmodule Shelly.EventsReconnectTest do
     end)
   end
 
-  test "disconnect reasons never leak the token-carrying URL" do
+  test "disconnect reasons are logged by shape, never verbatim" do
     log =
       capture_log(fn ->
         Shelly.Events.handle_disconnect(
-          %{
-            reason: %WebSockex.RequestError{
-              code: 401,
-              message: "wss://host:6113/shelly/wss/hk_sock?t=secret"
-            }
-          },
+          %{reason: %WebSockex.RequestError{code: 401, message: "Unauthorized"}},
           state(%{attempt: 10, connected_at: now()})
         )
       end)
 
-    refute log =~ "secret"
+    assert log =~ "WebSockex.RequestError"
+    assert log =~ "401"
+  end
+
+  test "a URL error never reaches the caller with the token in it" do
+    # WebSockex.URLError embeds the URL it was handed, and ours carries
+    # the access token as a query parameter.
+    # An empty or unparseable server yields WebSockex.URLError, which
+    # embeds the URL — and ours carries the token as a query parameter.
+    for server <- ["", "wss://", ":::"] do
+      assert Shelly.Events.start_link(
+               server: server,
+               token: "secret-token",
+               handler: fn _ -> :ok end
+             ) == {:error, :invalid_server_url}
+    end
   end
 end

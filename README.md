@@ -13,7 +13,7 @@ Pro 3, Gen4 switches — in production.
 ```elixir
 def deps do
   [
-    {:shelly, "~> 0.1"}
+    {:shelly, "~> 0.2"}
   ]
 end
 ```
