@@ -97,8 +97,11 @@ defmodule Shelly.Status do
     do: parse(status, channel, online, %{})
 
   def parse(_status, _channel, online, extra) when is_map(extra) do
+    # `:component` is a dispatch instruction, not a value — dropping it
+    # here too, or a payload that isn't even a map could be labelled
+    # "cover" with authority.
     unknown_status(%{}, online)
-    |> Map.merge(extra, fn _k, parsed, from_extra ->
+    |> Map.merge(Map.delete(extra, :component), fn _k, parsed, from_extra ->
       if is_nil(from_extra), do: parsed, else: from_extra
     end)
   end
@@ -267,15 +270,18 @@ defmodule Shelly.Status do
 
   @doc ~S|Normalize the v2 API's gen strings ("G1".."G4") to integers.|
   @spec gen_to_int(String.t() | integer() | term()) :: integer() | nil
-  def gen_to_int("G" <> rest) do
-    case Integer.parse(rest) do
+  def gen_to_int("G" <> rest), do: parse_gen(rest)
+  def gen_to_int(value) when is_binary(value), do: parse_gen(value)
+
+  def gen_to_int(n) when is_integer(n), do: n
+  def gen_to_int(_), do: nil
+
+  defp parse_gen(value) do
+    case Integer.parse(value) do
       {n, ""} -> n
       _ -> nil
     end
   end
-
-  def gen_to_int(n) when is_integer(n), do: n
-  def gen_to_int(_), do: nil
 
   # A caller who knows what the device is — a Shelly 2.5 in roller mode
   # reports `relays` AND `rollers` with no in-payload signal of its mode —
@@ -490,7 +496,9 @@ defmodule Shelly.Status do
   # says "stopped" forever. Falls back to the state vocabulary.
   defp cover_state(cover) do
     case numeric(cover["current_pos"]) do
-      position when is_number(position) ->
+      # A negative position means "not calibrated", not "closed" — the
+      # Gen1 roller path already treats it that way.
+      position when is_number(position) and position >= 0 ->
         position > 0
 
       _ ->
@@ -555,7 +563,9 @@ defmodule Shelly.Status do
   end
 
   defp parse_gen1_emeter(status, channel, online) do
-    emeter = at(status["emeters"], channel)
+    # A Gen1 3EM marks a phase it could not read; reporting the stale
+    # figure claims a measurement that was never taken.
+    emeter = status["emeters"] |> at(channel) |> valid_or_empty()
 
     gen1_common(status, channel, online)
     |> Map.merge(%{
@@ -575,6 +585,11 @@ defmodule Shelly.Status do
   # reporting it as a measurement claims data that was never collected.
   defp valid_reading?(%{"is_valid" => false}), do: false
   defp valid_reading?(_reading), do: true
+
+  defp valid_or_empty(reading) do
+    reading = as_map(reading)
+    if valid_reading?(reading), do: reading, else: %{}
+  end
 
   defp gen1_meter(meters, channel) when is_list(meters) do
     case Enum.at(meters, channel) do
@@ -758,23 +773,28 @@ defmodule Shelly.Status do
   # battery (devicepower / gen1 bat) and sensor temperature when the
   # component itself carried none.
   defp enrich(parsed, status, channel) do
+    # Same channel scoping as temperature: a two-channel device reported
+    # channel 0's battery as channel 1's.
     battery =
       opt_int(dig(status, ["devicepower:#{channel}", "battery", "percent"])) ||
-        opt_int(dig(status, ["devicepower:0", "battery", "percent"])) ||
-        opt_int(dig(status, ["bat", "value"]))
+        opt_int(dig(valid_or_empty(as_map(status["bat"])), ["value"]))
 
     # Only this channel's readings, plus the device-wide Gen1 ones. Falling
     # back to channel 0 gave every channel of a multi-channel device the
     # first channel's temperature as its own.
+    # These re-read the raw payload, so they must apply the same validity
+    # rule the component parsers do — otherwise a reading the device
+    # flagged as bad is refused by one path and reinstated by this one.
+    tmp = valid_or_empty(as_map(status["tmp"]))
+    hum = valid_or_empty(as_map(status["hum"]))
+
     temp =
       parsed[:temp_c] ||
         opt_float(dig(status, ["temperature:#{channel}", "tC"])) ||
-        opt_float(dig(status, ["tmp", "tC"])) ||
-        opt_float(dig(status, ["tmp", "value"]))
+        opt_float(tmp["tC"] || tmp["value"])
 
     humidity =
-      opt_float(dig(status, ["humidity:#{channel}", "rh"])) ||
-        opt_float(dig(status, ["hum", "value"]))
+      opt_float(dig(status, ["humidity:#{channel}", "rh"])) || opt_float(hum["value"])
 
     parsed
     |> Map.put(:battery, battery)

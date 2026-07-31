@@ -28,7 +28,12 @@ defmodule Shelly.Events do
   Reconnection uses in-process exponential backoff with jitter (a
   WebSockex constraint — the process is unresponsive while it waits)
   and gives up after `@max_attempts` consecutive failures, letting your
-  supervisor's restart policy take over. Note the access token rides
+  supervisor's restart policy take over. Note what that means in practice:
+  WebSockex exits `:normal` for a clean server-side close, and a
+  `:transient` child is **not** restarted on a normal exit — so a socket
+  the cloud closed politely stays closed. Use `restart: :permanent` (pass
+  it in the child options) if realtime must come back regardless of how
+  the connection ended. Note the access token rides
   the websocket URL (Shelly's protocol); this module never logs the
   URL and redacts disconnect reasons.
   """
@@ -101,7 +106,15 @@ defmodule Shelly.Events do
     |> WebSockex.start_link(
       __MODULE__,
       state,
-      Keyword.take(opts, [:name]) ++ [handle_initial_conn_failure: true]
+      Keyword.take(opts, [:name]) ++
+        [
+          handle_initial_conn_failure: true,
+          # Connect in the background. Without this, WebSockex runs the
+          # entire initial retry loop — minutes, with our backoff —
+          # before returning, so one unreachable account stalls the boot
+          # of the supervisor this module documents itself as living in.
+          async: true
+        ]
     )
     |> sanitize_start_error()
   end
@@ -288,13 +301,17 @@ defmodule Shelly.Events do
   # A scalar "device" value used to raise inside get_in/2 — outside
   # safe_call's rescue, so it killed the socket process.
   defp raw_device_id(message) do
-    from_device =
+    nested =
       case message["device"] do
         %{"id" => id} -> id
         _ -> nil
       end
 
-    from_device || message["deviceId"] || message["device_id"]
+    # Pick the first candidate that actually normalizes: choosing before
+    # normalizing meant `%{"device" => %{"id" => ""}}` masked a valid
+    # top-level "deviceId" and the event was dropped.
+    [nested, message["deviceId"], message["device_id"]]
+    |> Enum.find(fn candidate -> normalize_device_id(candidate) != nil end)
   end
 
   defp safe_call(handler, event) do
@@ -395,14 +412,15 @@ defmodule Shelly.Events do
   `normalize_device_id/1` when neither or both are known.
   """
   @spec normalize_device_id(String.t() | integer() | term(), Enumerable.t()) :: String.t() | nil
+  def normalize_device_id(id, %MapSet{} = known), do: resolve(id, known)
+
   def normalize_device_id(id, known_ids) do
     # Accepts anything enumerable, including the map `Shelly.Account`
     # returns — its keys are the ids.
-    known =
-      known_ids
-      |> normalize_known()
-      |> MapSet.new()
+    resolve(id, known_ids |> normalize_known() |> MapSet.new())
+  end
 
+  defp resolve(id, %MapSet{} = known) do
     case candidates(id) do
       [primary] ->
         primary
@@ -422,8 +440,12 @@ defmodule Shelly.Events do
     ids
     |> Enum.map(fn
       id when is_binary(id) -> String.downcase(id)
-      id -> id |> to_string() |> String.downcase()
+      # Through normalize_device_id/1, so an integer becomes the hex form
+      # devices are addressed by. to_string/1 gave the decimal rendering,
+      # which made an integer known-id resolve the ambiguity backwards.
+      id -> normalize_device_id(id)
     end)
+    |> Enum.reject(&is_nil/1)
   end
 
   # Both readings of an ambiguous id, likeliest first; one reading

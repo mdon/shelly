@@ -17,7 +17,10 @@ defmodule Shelly.HTTP do
   # :req_options must not replace these: overriding :headers dropped the
   # Authorization header (documented as additive), and :url or :method
   # could redirect a control command to another host.
-  @reserved [:method, :url, :form, :json, :params]
+  # :auth is here because Req's auth step calls put_header/3, so it
+  # replaces an Authorization header the library has already set — the
+  # same failure as overriding :headers, by a different door.
+  @reserved [:method, :url, :form, :json, :params, :auth]
 
   def request(base_options, source \\ %{}) do
     caller = options_from(source)
@@ -70,7 +73,7 @@ defmodule Shelly.HTTP do
   defp global_options do
     case Application.get_env(:shelly, :req_options, []) do
       options when is_list(options) ->
-        options
+        validate(options)
 
       invalid ->
         # Silently ignoring this makes a misconfigured proxy or timeout

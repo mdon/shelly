@@ -1,4 +1,6 @@
 defmodule Shelly.Client do
+  require Logger
+
   @moduledoc """
   Everything needed to talk to one Shelly account: where it lives, how to
   authenticate, how to pace requests.
@@ -96,7 +98,7 @@ defmodule Shelly.Client do
       auth_key: credential(Map.get(attrs, :auth_key)),
       label: Map.get(attrs, :label),
       rate_key: Map.get(attrs, :rate_key),
-      req_options: Map.get(attrs, :req_options, [])
+      req_options: req_options(Map.get(attrs, :req_options, []))
     }
   end
 
@@ -187,6 +189,14 @@ defmodule Shelly.Client do
 
   defp credential(_value), do: nil
 
+  defp req_options(options) do
+    if Keyword.keyword?(options) do
+      options
+    else
+      raise ArgumentError, ":req_options must be a keyword list, got: #{inspect(options)}"
+    end
+  end
+
   defp expires_at(nil), do: nil
   defp expires_at(%DateTime{} = at), do: at
 
@@ -200,6 +210,7 @@ defmodule Shelly.Client do
 
     case uri.host do
       host when is_binary(host) and host != "" ->
+        warn_dropped_path(uri, server)
         "https://" <> render_host(String.downcase(host)) <> port_suffix(uri)
 
       _ ->
@@ -214,6 +225,17 @@ defmodule Shelly.Client do
   # Keep a genuinely custom port, but drop the one URI.parse/1 filled in
   # from the *source* scheme: "http://host" arrives with port 80, and
   # carrying that onto an https URL sends every request to :80.
+  # Requests are built from `server <> "/device/..."`, so a base path
+  # would be lost. Saying so beats a proxy silently receiving requests at
+  # the wrong path.
+  defp warn_dropped_path(%URI{path: path}, server) when path not in [nil, "", "/"] do
+    Logger.warning(
+      "Shelly.Client: ignoring the path in #{inspect(server)} — a server is scheme, host and port"
+    )
+  end
+
+  defp warn_dropped_path(_uri, _server), do: :ok
+
   defp port_suffix(%URI{port: port, scheme: scheme}) do
     if is_nil(port) or port == URI.default_port(scheme || "https"), do: "", else: ":#{port}"
   end

@@ -64,7 +64,7 @@ defmodule Shelly.CloudV2 do
   def set_switch(conn, device_id, channel, on?, opts \\ []) when is_boolean(on?) do
     body =
       %{id: device_id, channel: channel, on: on?}
-      |> maybe_put(:toggle_after, Keyword.get(opts, :toggle_after))
+      |> merge_opts(opts)
 
     conn
     |> post_json("/v2/devices/api/set/switch", body)
@@ -83,7 +83,7 @@ defmodule Shelly.CloudV2 do
   def set_cover(conn, device_id, channel, position, opts \\ []) do
     body =
       %{id: device_id, channel: channel, position: position}
-      |> maybe_put(:toggle_after, Keyword.get(opts, :toggle_after))
+      |> merge_opts(opts)
 
     conn
     |> post_json("/v2/devices/api/set/cover", body)
@@ -127,8 +127,15 @@ defmodule Shelly.CloudV2 do
 
   defp element_id(_element), do: nil
 
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+  # Everything the caller passed reaches Shelly. Previously only
+  # :toggle_after did, so an option the @spec accepts was silently
+  # dropped — including a cover's :duration.
+  defp merge_opts(body, opts) do
+    Enum.reduce(opts, body, fn
+      {_key, nil}, acc -> acc
+      {key, value}, acc -> Map.put(acc, key, value)
+    end)
+  end
 
   defp post_json(conn, path, body) do
     if Shelly.Client.keyed?(conn),

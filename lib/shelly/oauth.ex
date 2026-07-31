@@ -225,7 +225,10 @@ defmodule Shelly.OAuth do
         server: api_url,
         token: token,
         refresh_token: extract_refresh_token(body) || carried[:refresh_token],
-        expires_at: expires_at(claims),
+        # A token whose payload can't be peeked has no deadline of its
+        # own; keeping the previous one is honest ("expiry unknown, treat
+        # the old one as due") where nil means "never expires" forever.
+        expires_at: expires_at(claims) || carried[:expires_at],
         # A label the caller set survives a refresh; the claims only fill in
         # when there is nothing to keep.
         label: carried[:label] || claims["email"] || claims["user"] || URI.parse(api_url).host
@@ -236,6 +239,7 @@ defmodule Shelly.OAuth do
   defp carried_over(%Shelly.Client{} = previous) do
     [
       label: previous.label,
+      expires_at: previous.expires_at,
       refresh_token: previous.refresh_token,
       auth_key: previous.auth_key,
       rate_key: previous.rate_key,

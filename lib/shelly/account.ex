@@ -38,9 +38,9 @@ defmodule Shelly.Account do
   @spec expand_channels(map()) :: [map()]
   def expand_channels(devices) when is_map(devices) do
     Enum.flat_map(devices, fn
-      {id, info} when is_map(info) -> expand_device(id, info)
+      {id, info} when is_binary(id) and is_map(info) -> expand_device(id, info)
       # A malformed entry is one device we can't offer, not a crash.
-      {_id, _info} -> []
+      _entry -> []
     end)
   end
 
@@ -127,17 +127,50 @@ defmodule Shelly.Account do
       case status do
         # An empty id is not an id — fall back rather than collapsing
         # every such entry under "".
-        %{"_dev_info" => %{"id" => id}} when is_binary(id) -> blank_to_nil(id) || outer_key
-        _ -> outer_key
+        %{"_dev_info" => %{"id" => id}} when is_binary(id) ->
+          blank_to_nil(id) || outer_key
+
+        # Numeric ids go through the same normalization the other two
+        # transports use, so one device is one key everywhere.
+        %{"_dev_info" => %{"id" => id}} when is_integer(id) ->
+          Shelly.Events.normalize_device_id(id)
+
+        _ ->
+          outer_key
       end
 
     id |> to_string() |> String.trim() |> String.downcase()
   end
 
-  @doc "Switch a relay channel on or off."
-  @spec set_switch(Shelly.Client.t(), String.t(), non_neg_integer(), boolean()) ::
+  @doc """
+  Switch a relay channel on or off.
+
+  Takes no options — in particular there is **no `:toggle_after`**, since
+  the account API has no equivalent of the v2 endpoint's cloud-side
+  watchdog. Passing it returns `{:error, :toggle_after_unsupported}`
+  rather than switching without the safety net you asked for. For
+  unattended equipment, heating especially, drive control through
+  `Shelly.CloudV2.set_switch/5` with an auth key — see "Controlling
+  equipment safely" in `Shelly`.
+  """
+  @spec set_switch(Shelly.Client.t(), String.t(), non_neg_integer(), boolean(), keyword()) ::
           :ok | {:error, term()}
-  def set_switch(%Shelly.Client{} = client, device_id, channel, on?) when is_boolean(on?) do
+  def set_switch(client, device_id, channel, on?, opts \\ [])
+
+  def set_switch(%Shelly.Client{}, _device_id, _channel, _on?, opts)
+      when is_list(opts) and opts != [] do
+    if Keyword.has_key?(opts, :toggle_after) do
+      # Silently dropping this would leave a caller believing their relay
+      # reverts if the app dies — for unattended heating that is the
+      # belief that matters most.
+      {:error, :toggle_after_unsupported}
+    else
+      {:error, {:unsupported_options, Keyword.keys(opts)}}
+    end
+  end
+
+  def set_switch(%Shelly.Client{} = client, device_id, channel, on?, _opts)
+      when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 
     case post(client, "/device/relay/control", body) do
@@ -156,7 +189,12 @@ defmodule Shelly.Account do
       Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
   """
   @spec parse_status(map(), non_neg_integer()) :: Shelly.Status.t()
-  def parse_status(raw_status, channel) when is_map(raw_status) do
+  # Total, like the parser it wraps: the documented usage is
+  # `parse_status(statuses[id], channel)`, and a missing id yields nil.
+  def parse_status(raw_status, channel) when not is_map(raw_status),
+    do: Shelly.Status.parse(raw_status, channel, false)
+
+  def parse_status(raw_status, channel) do
     # Account statuses carry the model and generation inside `_dev_info`,
     # not at the top level where the RPC parser looks — without this the
     # recommended path reported model: nil, gen: nil while the legacy
@@ -180,7 +218,7 @@ defmodule Shelly.Account do
   # reading it first reported every battery, Gen1 and virtual device as
   # offline.
   defp online?(%{"_dev_info" => %{"online" => online}}) when is_boolean(online), do: online
-  defp online?(%{"_dev_info" => %{"online" => online}}), do: online in [1, "true"]
+  defp online?(%{"_dev_info" => %{"online" => online}}), do: online in [1, "1", "true"]
 
   defp online?(%{"cloud" => cloud}) when is_map(cloud), do: cloud["connected"] == true
   defp online?(_status), do: false

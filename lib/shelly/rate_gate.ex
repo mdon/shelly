@@ -47,20 +47,29 @@ defmodule Shelly.RateGate do
   end
 
   defp run_paced(key, fun, gate) do
-    case GenServer.call(gate, {:reserve, key}, @max_backlog_ms + 5_000) do
+    case reserve(key, gate) do
       {:ok, wait} ->
         if wait > 0, do: Process.sleep(wait)
         fun.()
 
       {:error, :throttled} ->
         {:error, :throttled}
+
+      # The gate stopped between the lookup and the call. Unpaced is the
+      # documented behaviour when it isn't running.
+      :no_gate ->
+        fun.()
     end
+  end
+
+  # The catch belongs here and nowhere near `fun.()`: wrapping the call
+  # site meant an exit raised by the *request* — a dead Finch pool exits
+  # {:noproc, _} — was read as a dead gate, and the request ran a second
+  # time. A duplicated switch command is not a survivable retry.
+  defp reserve(key, gate) do
+    GenServer.call(gate, {:reserve, key}, @max_backlog_ms + 5_000)
   catch
-    # The gate can stop between the lookup and the call. Unpaced is the
-    # documented behaviour when it isn't running; exiting the caller's
-    # process is not.
-    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
-      fun.()
+    :exit, _reason -> :no_gate
   end
 
   @impl true

@@ -76,6 +76,75 @@ which is now a standing note in `AGENTS.md`.
   silently disabling pacing, and an invalid global `:req_options` is
   logged rather than discarded.
 
+### Fixed (second blind review round)
+
+A second context-free review, run against code the first one had already
+been through, found 19 more. The recurring shape is unchanged and worth
+naming: **a rule applied in one place and not at its sibling a few lines
+away.**
+
+- **`Shelly.RateGate.run/3` could send a command twice.** Its `catch`
+  wrapped the request function as well as the gate call, so a request
+  exiting `{:noproc, _}` — what a dead Finch pool produces — was read as
+  "the gate died" and re-run unpaced. A duplicated switch command is not
+  a survivable retry.
+- **`Shelly.Events.start_link/2` blocked its caller for minutes.**
+  WebSockex ran the entire initial retry loop before returning, so one
+  unreachable account stalled the boot of the supervisor this module
+  documents itself as living in. It connects asynchronously now.
+- **`enrich/2` reinstated Gen1 readings the parser had refused.** The
+  component parsers honour `is_valid: false`; enrichment re-read the same
+  raw maps without it, so a temperature the device flagged as bad was
+  rejected by one path and restored by the other. The Gen1 emeter parser
+  never checked the flag at all.
+- **Battery enrichment was not channel-scoped**, so channel 1 of a
+  two-channel device reported channel 0's battery — the fix that had
+  already been applied to temperature, three lines away.
+- **`Account.parse_status/2` raised on `nil`**, which is exactly what the
+  documented usage — `parse_status(statuses[id], channel)` — produces for
+  an id that isn't in the map. It is total now, like the parser it wraps.
+- **`req_options: [auth: …]` replaced the Authorization header.** Req's
+  auth step calls `put_header/3`, so it reached the same failure the
+  `@reserved` list exists to prevent, by a door that list didn't cover.
+- **An unusable nested `device.id` masked a valid top-level `deviceId`**,
+  because the choice was made before normalization and `""` is truthy.
+- **Integer members of `:known_ids` were rendered decimal**, so an
+  integer known-id resolved the ambiguous case to the wrong device — the
+  precise outcome the option exists to prevent. The precomputed set is
+  also no longer rebuilt on every frame.
+- **A Gen2 cover with a negative `current_pos` reported closed** while the
+  Gen1 roller reported open; only one path guarded the "uncalibrated"
+  sentinel.
+- **`extra: %{component: …}` still relabelled on the non-map clause**, the
+  one key the map clause deletes precisely to avoid a confident wrong
+  label.
+- **A refresh into an opaque token produced a client that never expires**
+  — the trap the docs warn callers about, reachable through the library's
+  own refresh path. It keeps the previous deadline now.
+- `set_switch/5` and `set_cover/5` pass every option they are given
+  (only `:toggle_after` used to survive); the global `:req_options` is
+  keyword-validated like the per-call one; a dropped base path is warned
+  about rather than silently discarded; device ids are keyed identically
+  by all three transports; `gen_to_int/1` accepts a bare `"2"`.
+
+### Changed (second blind review round)
+
+- **`Shelly.Account.set_switch/5` refuses `:toggle_after`** with
+  `{:error, :toggle_after_unsupported}` rather than switching without it.
+  The account API has no equivalent of the v2 cloud-side watchdog, and
+  silently dropping the option would leave a caller believing their relay
+  reverts if the application dies — for unattended heating, the belief
+  that matters most.
+- **`Shelly` gained a "Controlling equipment safely" section**: a
+  successful call means the cloud accepted the command, not that the
+  relay moved; treat `on: nil` as "unknown, re-issue"; use the v2
+  watchdog for anything unattended; don't let the websocket be your only
+  view. The library does not read relays back, and now says so where a
+  reader will find it.
+- `Shelly.Events`' moduledoc documents what "gives up" means for a
+  supervisor — a clean server-side close exits `:normal`, which a
+  `:transient` child will not restart.
+
 ### Fixed (blind review round)
 
 A review run with **no context at all** — no history, no known issues, no
