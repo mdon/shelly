@@ -69,8 +69,9 @@ wrong answer instead of an error.
 - The `*.shelly.cloud` host pin was case-sensitive, so an uppercase claim
   silently rerouted to the fallback server. (The pin itself was probed for
   userinfo, suffix, port and path bypasses and holds.)
-- `Events.start_link/1` no longer returns `WebSockex.URLError` verbatim: it
-  embeds the connection URL, which carries the access token.
+- `Events.start_link/1` no longer returns WebSockex's URL error verbatim
+  (it embeds the connection URL, which carries the access token); an
+  unusable server address comes back as `{:error, :invalid_server_url}`.
 - An `Online` event with no readable flag is no longer reported as offline —
   a missing field is not evidence that a device is down.
 - A scalar `"device"` value in an event used to raise inside `get_in/2`,
