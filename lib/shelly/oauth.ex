@@ -44,11 +44,27 @@ defmodule Shelly.OAuth do
 
   require Logger
 
+  @typedoc """
+  The result of an authorization-code exchange or a refresh.
+
+  `:expires_at` comes from the token's own `exp` claim — access tokens
+  last 12 hours — and `:refresh_token` is whatever the server returned,
+  which today is usually `nil`. Persist both.
+  """
+  @type grant :: %{
+          access_token: String.t(),
+          refresh_token: String.t() | nil,
+          expires_at: DateTime.t() | nil,
+          user_api_url: String.t(),
+          label: String.t()
+        }
+
   @default_client_id "shelly-diy"
   @login_url "https://my.shelly.cloud/oauth_login.html"
   @fallback_server "https://shelly-1-eu.shelly.cloud"
 
   @doc "URL to open (usually in a popup) to start the grant."
+  @spec authorize_url(String.t(), String.t()) :: String.t()
   def authorize_url(redirect_uri, client_id \\ @default_client_id) do
     @login_url <> "?" <> URI.encode_query(client_id: client_id, redirect_uri: redirect_uri)
   end
@@ -66,6 +82,7 @@ defmodule Shelly.OAuth do
   the server returned under `refresh_token`, or `nil`. **Persist both** —
   a token that looks permanent stops working 12 hours in.
   """
+  @spec exchange_code(String.t(), String.t()) :: {:ok, grant()} | {:error, term()}
   def exchange_code(code, client_id \\ @default_client_id) when is_binary(code) do
     server = server_from_jwt(code) || @fallback_server
 
@@ -110,6 +127,8 @@ defmodule Shelly.OAuth do
         {:error, :refresh_unsupported} -> ask_user_to_reconnect()
       end
   """
+  @spec refresh(map(), String.t()) ::
+          {:ok, grant()} | {:error, :refresh_unsupported | :no_token | term()}
   def refresh(account, client_id \\ @default_client_id)
 
   def refresh(%{server: server, token: token} = account, client_id) when is_binary(token) do
@@ -183,6 +202,7 @@ defmodule Shelly.OAuth do
   `:refresh_token` from this map, and dropping it here meant the
   documented path quietly sent the *access* token as the refresh token.
   """
+  @spec to_account(grant()) :: map()
   def to_account(%{access_token: token, user_api_url: url} = grant) do
     %{
       server: url,
@@ -193,6 +213,7 @@ defmodule Shelly.OAuth do
   end
 
   @doc "Read a JWT's payload without verification (routing only — do not trust)."
+  @spec peek_jwt(String.t() | nil) :: map() | nil
   def peek_jwt(token) when is_binary(token) do
     with [_, payload, _] <- String.split(token, "."),
          {:ok, json} <- Base.url_decode64(payload, padding: false),

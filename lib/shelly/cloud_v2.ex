@@ -32,6 +32,8 @@ defmodule Shelly.CloudV2 do
       Shelly.Status.parse(el["status"], channel, el["online"] in [1, true],
         %{model: el["code"], gen: Shelly.Status.gen_to_int(el["gen"])})
   """
+  @spec get_statuses(conn(), [String.t()]) ::
+          {:ok, %{optional(String.t()) => map()}} | {:error, term()}
   def get_statuses(conn, device_ids) when is_list(device_ids) do
     if length(device_ids) > 10 do
       {:error, :too_many_ids}
@@ -57,39 +59,56 @@ defmodule Shelly.CloudV2 do
   cloud to revert the command later — a watchdog that survives your
   app going down.
   """
+  @spec set_switch(conn(), String.t(), non_neg_integer(), boolean(), keyword()) ::
+          :ok | {:error, term()}
   def set_switch(conn, device_id, channel, on?, opts \\ []) when is_boolean(on?) do
     body =
       %{id: device_id, channel: channel, on: on?}
       |> maybe_put(:toggle_after, Keyword.get(opts, :toggle_after))
 
-    case post_json(conn, "/v2/devices/api/set/switch", body) do
-      {:ok, %{status: 200}} -> :ok
-      other -> error(other)
-    end
+    conn
+    |> post_json("/v2/devices/api/set/switch", body)
+    |> command_result()
   end
 
-  @doc "Control a cover: position is \"open\" | \"close\" | \"stop\" | 0..100."
+  @doc ~S(Control a cover: position is "open" | "close" | "stop" | 0..100.)
+  @spec set_cover(
+          conn(),
+          String.t(),
+          non_neg_integer(),
+          String.t() | non_neg_integer(),
+          keyword()
+        ) ::
+          :ok | {:error, term()}
   def set_cover(conn, device_id, channel, position, _opts \\ []) do
     body = %{id: device_id, channel: channel, position: position}
 
-    case post_json(conn, "/v2/devices/api/set/cover", body) do
-      {:ok, %{status: 200}} -> :ok
-      other -> error(other)
-    end
+    conn
+    |> post_json("/v2/devices/api/set/cover", body)
+    |> command_result()
   end
 
   @doc "Control a light: opts may include :on, :brightness, :temperature, :toggle_after."
+  @spec set_light(conn(), String.t(), non_neg_integer(), keyword()) :: :ok | {:error, term()}
   def set_light(conn, device_id, channel, opts \\ []) do
     body =
       opts
       |> Map.new()
       |> Map.merge(%{id: device_id, channel: channel})
 
-    case post_json(conn, "/v2/devices/api/set/light", body) do
-      {:ok, %{status: 200}} -> :ok
-      other -> error(other)
-    end
+    conn
+    |> post_json("/v2/devices/api/set/light", body)
+    |> command_result()
   end
+
+  # A rejected command comes back as HTTP 200 with "isok": false. Reading
+  # only the status code reported a switch that never moved as switched —
+  # which on a control API is the worst possible direction to be wrong.
+  defp command_result({:ok, %{status: 200, body: %{"isok" => false}} = response}),
+    do: error({:ok, response})
+
+  defp command_result({:ok, %{status: 200}}), do: :ok
+  defp command_result(other), do: error(other)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

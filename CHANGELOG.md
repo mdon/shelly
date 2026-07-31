@@ -94,9 +94,31 @@ wrong answer instead of an error.
   (they last 12 hours), and `Events`' moduledoc no longer claims string ids
   pass through unchanged.
 
+### Also in this release — quality sweep
+
+Applied the workspace quality-sweep playbook (`~/Desktop/elixir/dev_docs/
+quality_sweep.md`), whose central claim is that code review and tooling
+catch different things. It held: dialyzer found three dead clauses six
+models had read past, and the first HTTP-level test of `CloudV2` found
+that a **rejected control command was reported as success** — Shelly
+answers a refused switch with HTTP 200 and `"isok": false`, and only the
+status code was being checked.
+
+- `mix precommit` — format, unused deps, warnings-as-errors, tests with a
+  90% coverage floor, `credo --strict`, dialyzer — all green.
+- `@spec` on the public API, plus `Shelly.Status.t()` and
+  `Shelly.OAuth.grant()` types. The status map stays a map by design
+  (transports differ in what they can report); that contract is now
+  stated rather than implied.
+- The three dispatch tables in `Shelly.Status` collapsed into one
+  (`component_tag/2`), so a new device class is added in one place and
+  the drift that caused the Gen1 alarm mismatch can't recur.
+- Coverage 72% → 92%, using only `mix test --cover` and Req's `:plug`
+  option — no mocking dependencies.
+
 ### Tests
 
-40 → 107. New: an agreement matrix asserting `parse/4`, `has_component?/2`
+40 → 139. New: an agreement matrix asserting `parse/4`, `has_component?/2`
 and `component_of/2` give one answer for 29 payload shapes (this catches the
 whole drift class at once), partial-delta behaviour, the Gen1 6-character id
 forms, and the first HTTP-level tests for `Account`.

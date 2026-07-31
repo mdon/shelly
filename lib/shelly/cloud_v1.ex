@@ -8,7 +8,7 @@ defmodule Shelly.CloudV1 do
   Takes the same `conn` map as `Shelly.CloudV2`.
   """
 
-  @type conn :: %{server: String.t(), auth_key: String.t()}
+  @type conn :: Shelly.CloudV2.conn()
 
   @doc """
   Full status for one device, as `{:ok, {device_status, online}}` —
@@ -20,6 +20,7 @@ defmodule Shelly.CloudV1 do
   handed callers a map `Shelly.Status.parse/4` reads as `"unknown"` with
   `on: false` — a device that looks permanently off.
   """
+  @spec get_status(conn(), String.t()) :: {:ok, {map(), boolean()}} | {:error, term()}
   def get_status(conn, device_id) do
     case post(conn, "/device/status", id: device_id) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => data}}} when is_map(data) ->
@@ -31,6 +32,7 @@ defmodule Shelly.CloudV1 do
   end
 
   @doc "Switch a relay channel on or off."
+  @spec set_switch(conn(), String.t(), non_neg_integer(), boolean()) :: :ok | {:error, term()}
   def set_switch(conn, device_id, channel, on?) when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 

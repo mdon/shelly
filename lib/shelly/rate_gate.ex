@@ -41,18 +41,19 @@ defmodule Shelly.RateGate do
         when result: var
   def run(key, fun, gate \\ __MODULE__) when is_function(fun, 0) do
     case GenServer.whereis(gate) do
-      nil ->
+      nil -> fun.()
+      _pid -> run_paced(key, fun, gate)
+    end
+  end
+
+  defp run_paced(key, fun, gate) do
+    case GenServer.call(gate, {:reserve, key}, @max_backlog_ms + 5_000) do
+      {:ok, wait} ->
+        if wait > 0, do: Process.sleep(wait)
         fun.()
 
-      _pid ->
-        case GenServer.call(gate, {:reserve, key}, @max_backlog_ms + 5_000) do
-          {:ok, wait} ->
-            if wait > 0, do: Process.sleep(wait)
-            fun.()
-
-          {:error, :throttled} ->
-            {:error, :throttled}
-        end
+      {:error, :throttled} ->
+        {:error, :throttled}
     end
   end
 

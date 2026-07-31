@@ -4,11 +4,24 @@ defmodule Shelly.MixProject do
   @version "0.2.1"
   @source_url "https://github.com/mdon/shelly"
 
+  # So `mix precommit` runs its test step in :test rather than :dev.
+  def cli do
+    [preferred_envs: [precommit: :test]]
+  end
+
   def project do
     [
       app: :shelly,
       version: @version,
       elixir: "~> 1.15",
+      aliases: aliases(),
+      # A floor, not a target: below this something shipped untested.
+      test_coverage: [summary: [threshold: 90]],
+      dialyzer: [
+        plt_add_apps: [:mix, :ex_unit],
+        flags: [:error_handling, :extra_return],
+        ignore_warnings: ".dialyzer_ignore.exs"
+      ],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: description(),
@@ -30,7 +43,26 @@ defmodule Shelly.MixProject do
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       # Req's optional plug adapter — lets the OAuth tests answer requests
       # in-process instead of reaching Shelly's servers.
-      {:plug, "~> 1.16", only: :test}
+      {:plug, "~> 1.16", only: :test},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+    ]
+  end
+
+  # One gate for the tooling pass: formatting, warnings, unused deps,
+  # credo and dialyzer. Code review catches design; this catches dead
+  # clauses, drifted formatting and stale deps, and the two sets don't
+  # overlap much.
+  defp aliases do
+    [
+      precommit: [
+        "format --check-formatted",
+        "deps.unlock --check-unused",
+        "compile --force --warnings-as-errors",
+        "test --cover",
+        "credo --strict",
+        "dialyzer"
+      ]
     ]
   end
 

@@ -39,6 +39,7 @@ defmodule Shelly.Events do
 
   require Logger
 
+  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     server = Keyword.fetch!(opts, :server)
     token = Keyword.fetch!(opts, :token)
@@ -186,7 +187,7 @@ defmodule Shelly.Events do
 
   # A scalar "device" value used to raise inside get_in/2 — outside
   # safe_call's rescue, so it killed the socket process.
-  defp raw_device_id(message) when is_map(message) do
+  defp raw_device_id(message) do
     from_device =
       case message["device"] do
         %{"id" => id} -> id
@@ -195,8 +196,6 @@ defmodule Shelly.Events do
 
     from_device || message["deviceId"] || message["device_id"]
   end
-
-  defp raw_device_id(_message), do: nil
 
   defp safe_call(handler, event) do
     handler.(event)
@@ -231,6 +230,7 @@ defmodule Shelly.Events do
   """
   @hex_id_widths [6, 12]
 
+  @spec normalize_device_id(String.t() | integer() | term()) :: String.t() | nil
   def normalize_device_id(id) when is_binary(id) do
     id = String.trim(id)
 

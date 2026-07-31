@@ -29,6 +29,7 @@ defmodule Shelly.Account do
   Returns `{:ok, devices}` where `devices` is the raw map keyed by
   device id — see `expand_channels/1` for a flattened per-channel list.
   """
+  @spec list_devices(account()) :: {:ok, map()} | {:error, term()}
   def list_devices(account) do
     case post(account, "/interface/device/get_all_lists", []) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices" => devices}}}} ->
@@ -43,6 +44,7 @@ defmodule Shelly.Account do
   Flatten a `list_devices/1` result into one entry per channel —
   multi-relay devices (Pro 2/3/4) become several addable rows.
   """
+  @spec expand_channels(map()) :: [map()]
   def expand_channels(devices) when is_map(devices) do
     Enum.flat_map(devices, fn {id, info} ->
       channels = channel_count(info["channels_count"])
@@ -84,6 +86,7 @@ defmodule Shelly.Account do
   devices), and a caller looking a device up by id would silently miss
   it. The outer key is the fallback when an entry carries no `_dev_info`.
   """
+  @spec all_statuses(account()) :: {:ok, %{optional(String.t()) => map()}} | {:error, term()}
   def all_statuses(account) do
     case post(account, "/device/all_status", show_info: true) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices_status" => statuses}}}} ->
@@ -105,6 +108,7 @@ defmodule Shelly.Account do
   end
 
   @doc "Switch a relay channel on or off."
+  @spec set_switch(account(), String.t(), non_neg_integer(), boolean()) :: :ok | {:error, term()}
   def set_switch(account, device_id, channel, on?) when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 
@@ -121,6 +125,7 @@ defmodule Shelly.Account do
       {:ok, statuses} = Shelly.Account.all_statuses(account)
       Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
   """
+  @spec parse_status(map(), non_neg_integer()) :: Shelly.Status.t()
   def parse_status(raw_status, channel) when is_map(raw_status) do
     Shelly.Status.parse(raw_status, channel, online?(raw_status))
   end

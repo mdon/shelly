@@ -22,69 +22,45 @@ defmodule Shelly.Status do
   those as a full status would wrongly report the device off.
   """
 
+  @typedoc """
+  A parsed status. Deliberately a plain map, not a struct: transports
+  differ in what they can report, and callers pattern-match the keys they
+  need. `:on` is `nil` when the payload named the component but carried
+  no state for it (a partial websocket delta) — unknown, not off.
+  """
+  @type t :: %{
+          on: boolean() | nil,
+          online: boolean(),
+          watts: float(),
+          voltage: float() | nil,
+          current: float() | nil,
+          energy_wh: float() | nil,
+          temp_c: float() | nil,
+          humidity: float() | nil,
+          battery: integer() | nil,
+          rssi: integer() | nil,
+          input_state: boolean() | nil,
+          source: String.t() | nil,
+          model: String.t() | nil,
+          gen: integer() | nil,
+          metered: boolean(),
+          component: String.t(),
+          raw: map()
+        }
+
   @doc """
   Parse a device_status map for one channel. `online` is supplied by the
   caller (it lives outside device_status in every transport). `extra`
   merges transport-level fields (model/gen) over the parsed defaults.
   """
+  @spec parse(map() | term(), non_neg_integer(), boolean(), map()) :: t()
   def parse(status, channel, online, extra \\ %{})
 
   def parse(status, channel, online, extra) when is_map(status) do
     base =
-      cond do
-        is_map(status["switch:#{channel}"]) ->
-          parse_switch(status, channel, online)
-
-        is_map(status["cover:#{channel}"]) ->
-          parse_cover(status, channel, online)
-
-        is_map(status["light:#{channel}"]) ->
-          parse_light(status, channel, online)
-
-        is_map(status["pm1:#{channel}"]) ->
-          parse_pm1(status, channel, online)
-
-        is_map(status["em1:#{channel}"]) ->
-          parse_em1(status, channel, online)
-
-        is_map(status["em:0"]) and channel == 0 ->
-          parse_em(status, online)
-
-        light_family_key(status, channel) ->
-          parse_light_family(status, channel, online)
-
-        is_map(status["flood:#{channel}"]) ->
-          parse_alarm(status, "flood", channel, online)
-
-        is_map(status["smoke:#{channel}"]) ->
-          parse_alarm(status, "smoke", channel, online)
-
-        is_map(status["presence:#{channel}"]) ->
-          parse_presence(status, channel, online)
-
-        is_map(status["temperature:#{channel}"]) or is_map(status["humidity:#{channel}"]) ->
-          parse_rpc_sensor(status, channel, online)
-
-        is_map(status["voltmeter:#{channel}"]) ->
-          parse_voltmeter(status, channel, online)
-
-        gen1_channel_present?(status["relays"], channel) ->
-          parse_gen1_relay(status, channel, online)
-
-        gen1_channel_present?(status["lights"], channel) ->
-          parse_gen1_light(status, channel, online)
-
-        gen1_channel_present?(status["rollers"], channel) ->
-          parse_gen1_roller(status, channel, online)
-
-        gen1_channel_present?(status["emeters"], channel) ->
-          parse_gen1_emeter(status, channel, online)
-
-        gen1_sensor?(status) ->
-          parse_gen1_sensor(status, online)
-
-        true ->
-          unknown_status(status, online)
+      case component_tag(status, channel) do
+        nil -> unknown_status(status, online)
+        tag -> parse_tagged(tag, status, channel, online)
       end
 
     base
@@ -106,33 +82,129 @@ defmodule Shelly.Status do
   Partial payloads (websocket deltas with only `sys` or an input
   update) must be skipped, not parsed into a false "off".
   """
+  @spec has_component?(map() | term(), non_neg_integer()) :: boolean()
   def has_component?(status, channel) when is_map(status) do
-    is_map(status["switch:#{channel}"]) or
-      is_map(status["cover:#{channel}"]) or
-      is_map(status["light:#{channel}"]) or
-      is_map(status["pm1:#{channel}"]) or
-      is_map(status["em1:#{channel}"]) or
-      (channel == 0 and is_map(status["em:0"])) or
-      light_family_key(status, channel) != nil or
-      is_map(status["flood:#{channel}"]) or
-      is_map(status["smoke:#{channel}"]) or
-      is_map(status["presence:#{channel}"]) or
-      is_map(status["temperature:#{channel}"]) or
-      is_map(status["humidity:#{channel}"]) or
-      is_map(status["voltmeter:#{channel}"]) or
-      gen1_sensor?(status) or
-      gen1_channel_present?(status["relays"], channel) or
-      gen1_channel_present?(status["lights"], channel) or
-      gen1_channel_present?(status["rollers"], channel) or
-      gen1_channel_present?(status["emeters"], channel)
+    component_tag(status, channel) != nil
   end
 
   def has_component?(_status, _channel), do: false
+
+  ## One dispatch --------------------------------------------------------
+  #
+  # `parse/4`, `has_component?/2` and `component_of/2` used to enumerate
+  # every device class separately. They drifted — `component_of/2` called
+  # a Gen1 flood sensor "sensor" while `parse/4` called it "flood", so a
+  # caller guarding one against the other dropped every event from those
+  # devices, and Gen1 arrays were dispatched without the channel check the
+  # other two applied. All three now derive from `component_tag/2`, so a
+  # new device class is added in exactly one place.
+
+  # {payload key prefix, tag, reported component}
+  @rpc_components [
+    {"switch", :switch, "switch"},
+    {"cover", :cover, "cover"},
+    {"light", :light, "light"},
+    {"pm1", :pm1, "pm"},
+    {"em1", :em1, "em"},
+    {"flood", :flood, "flood"},
+    {"smoke", :smoke, "smoke"},
+    {"presence", :presence, "presence"},
+    {"voltmeter", :voltmeter, "sensor"}
+  ]
+
+  # {payload key, tag, reported component} — Gen1 arrays, indexed by channel
+  @gen1_arrays [
+    {"relays", :gen1_relay, "relay"},
+    {"lights", :gen1_light, "light"},
+    {"rollers", :gen1_roller, "cover"},
+    {"emeters", :gen1_emeter, "em"}
+  ]
+
+  defp component_tag(status, channel) do
+    rpc_tag(status, channel) || gen1_tag(status, channel)
+  end
+
+  defp rpc_tag(status, channel) do
+    Enum.find_value(@rpc_components, fn {prefix, tag, _component} ->
+      if is_map(status["#{prefix}:#{channel}"]), do: tag
+    end) || rpc_special_tag(status, channel)
+  end
+
+  defp rpc_special_tag(status, channel) do
+    cond do
+      # Three-phase aggregate only exists on channel 0.
+      channel == 0 and is_map(status["em:0"]) -> :em
+      light_family_key(status, channel) -> :light_family
+      is_map(status["temperature:#{channel}"]) -> :rpc_sensor
+      is_map(status["humidity:#{channel}"]) -> :rpc_sensor
+      true -> nil
+    end
+  end
+
+  defp gen1_tag(status, channel) do
+    Enum.find_value(@gen1_arrays, fn {key, tag, _component} ->
+      if gen1_channel_present?(status[key], channel), do: tag
+    end) || if gen1_sensor?(status), do: :gen1_sensor
+  end
+
+  defp tag_component(:light_family, _status), do: "light"
+  defp tag_component(:rpc_sensor, _status), do: "sensor"
+  defp tag_component(:em, _status), do: "em"
+  # Must match what parse_gen1_sensor/2 reports, or a caller guarding one
+  # against the other silently drops the device.
+  defp tag_component(:gen1_sensor, status), do: gen1_sensor_component(status)
+
+  defp tag_component(tag, _status) do
+    Enum.find_value(@rpc_components ++ @gen1_arrays, fn {_key, candidate, component} ->
+      if candidate == tag, do: component
+    end)
+  end
+
+  defp parse_tagged(:switch, status, channel, online), do: parse_switch(status, channel, online)
+  defp parse_tagged(:cover, status, channel, online), do: parse_cover(status, channel, online)
+  defp parse_tagged(:light, status, channel, online), do: parse_light(status, channel, online)
+  defp parse_tagged(:pm1, status, channel, online), do: parse_pm1(status, channel, online)
+  defp parse_tagged(:em1, status, channel, online), do: parse_em1(status, channel, online)
+  defp parse_tagged(:em, status, _channel, online), do: parse_em(status, online)
+
+  defp parse_tagged(:light_family, status, channel, online),
+    do: parse_light_family(status, channel, online)
+
+  defp parse_tagged(:flood, status, channel, online),
+    do: parse_alarm(status, "flood", channel, online)
+
+  defp parse_tagged(:smoke, status, channel, online),
+    do: parse_alarm(status, "smoke", channel, online)
+
+  defp parse_tagged(:presence, status, channel, online),
+    do: parse_presence(status, channel, online)
+
+  defp parse_tagged(:rpc_sensor, status, channel, online),
+    do: parse_rpc_sensor(status, channel, online)
+
+  defp parse_tagged(:voltmeter, status, channel, online),
+    do: parse_voltmeter(status, channel, online)
+
+  defp parse_tagged(:gen1_relay, status, channel, online),
+    do: parse_gen1_relay(status, channel, online)
+
+  defp parse_tagged(:gen1_light, status, channel, online),
+    do: parse_gen1_light(status, channel, online)
+
+  defp parse_tagged(:gen1_roller, status, channel, online),
+    do: parse_gen1_roller(status, channel, online)
+
+  defp parse_tagged(:gen1_emeter, status, channel, online),
+    do: parse_gen1_emeter(status, channel, online)
+
+  defp parse_tagged(:gen1_sensor, status, _channel, online),
+    do: parse_gen1_sensor(status, online)
 
   defp gen1_channel_present?(list, channel) when is_list(list), do: length(list) > channel
   defp gen1_channel_present?(_, _), do: false
 
   @doc ~S|Normalize the v2 API's gen strings ("G1".."G4") to integers.|
+  @spec gen_to_int(String.t() | integer() | term()) :: integer() | nil
   def gen_to_int("G" <> rest) do
     case Integer.parse(rest) do
       {n, ""} -> n
@@ -330,20 +402,14 @@ defmodule Shelly.Status do
     roller = Enum.at(status["rollers"] || [], channel) || %{}
     meter = gen1_meter(status["meters"], channel)
 
-    position = roller["current_pos"]
+    watts = roller["power"] || (meter && meter["power"])
 
     gen1_common(status, channel, online)
     |> Map.merge(%{
-      # Gen1 rollers report "open" | "close" | "stop"; when calibrated,
-      # current_pos (0..100) is the reliable openness signal.
-      on:
-        if(is_number(position) and position >= 0,
-          do: position > 0,
-          else: roller["state"] == "open"
-        ),
-      watts: to_float(roller["power"] || (meter && meter["power"])),
+      on: roller_open?(roller),
+      watts: to_float(watts),
       energy_wh: watt_minutes_to_wh(meter && meter["total"]),
-      metered: is_number(roller["power"] || (meter && meter["power"])),
+      metered: is_number(watts),
       component: "cover"
     })
   end
@@ -374,6 +440,14 @@ defmodule Shelly.Status do
 
   defp gen1_meter(_meters, _channel), do: nil
 
+  # Gen1 rollers report "open" | "close" | "stop"; when calibrated,
+  # current_pos (0..100) is the reliable openness signal.
+  defp roller_open?(%{"current_pos" => position}) when is_number(position) and position >= 0,
+    do: position > 0
+
+  defp roller_open?(%{"state" => state}), do: state == "open"
+  defp roller_open?(_roller), do: nil
+
   defp gen1_common(status, channel, online) do
     wifi = status["wifi_sta"] || %{}
     input = Enum.at(status["inputs"] || [], channel) || %{}
@@ -399,7 +473,7 @@ defmodule Shelly.Status do
 
   # CCT / RGB / RGBW / RGBCCT lights share the light contract (output +
   # optional apower); resolve whichever variant the channel has.
-  defp light_family_key(status, channel) when is_map(status) do
+  defp light_family_key(status, channel) do
     Enum.find(
       ["cct:#{channel}", "rgb:#{channel}", "rgbw:#{channel}", "rgbcct:#{channel}"],
       fn key ->
@@ -407,8 +481,6 @@ defmodule Shelly.Status do
       end
     )
   end
-
-  defp light_family_key(_, _), do: nil
 
   defp parse_light_family(status, channel, online) do
     light = status[light_family_key(status, channel)]
@@ -460,15 +532,22 @@ defmodule Shelly.Status do
 
   # Gen1 battery sensors (H&T, Flood, Smoke, Door/Window, Motion) have
   # tmp/hum/bat/alarm keys and no actuator arrays.
-  defp gen1_sensor?(status) when is_map(status) do
-    (is_map(status["tmp"]) or is_map(status["hum"]) or is_map(status["bat"]) or
-       is_map(status["sensor"]) or
-       is_boolean(status["flood"]) or is_boolean(status["smoke"]) or is_boolean(status["motion"])) and
-      not is_list(status["relays"]) and not is_list(status["lights"]) and
-      not is_list(status["rollers"]) and not is_list(status["emeters"])
+  @gen1_sensor_maps ~w(tmp hum bat sensor)
+  @gen1_sensor_flags ~w(flood smoke motion)
+
+  defp gen1_sensor?(status) do
+    sensor_shaped? =
+      Enum.any?(@gen1_sensor_maps, &is_map(status[&1])) or
+        Enum.any?(@gen1_sensor_flags, &is_boolean(status[&1]))
+
+    sensor_shaped? and not gen1_actuator?(status)
   end
 
-  defp gen1_sensor?(_), do: false
+  # A device with an actuator array is that actuator, not a sensor —
+  # even when it also reports temperature or a flood flag.
+  defp gen1_actuator?(status) do
+    Enum.any?(@gen1_arrays, fn {key, _tag, _component} -> is_list(status[key]) end)
+  end
 
   defp parse_gen1_sensor(status, online) do
     on =
@@ -533,64 +612,11 @@ defmodule Shelly.Status do
   "sensor") or nil when none — use it to guard event deltas against a
   device's known component before applying `parse/4`.
   """
+  @spec component_of(map() | term(), non_neg_integer()) :: String.t() | nil
   def component_of(status, channel) when is_map(status) do
-    cond do
-      is_map(status["switch:#{channel}"]) ->
-        "switch"
-
-      is_map(status["cover:#{channel}"]) ->
-        "cover"
-
-      is_map(status["light:#{channel}"]) ->
-        "light"
-
-      light_family_key(status, channel) ->
-        "light"
-
-      is_map(status["pm1:#{channel}"]) ->
-        "pm"
-
-      is_map(status["em1:#{channel}"]) ->
-        "em"
-
-      channel == 0 and is_map(status["em:0"]) ->
-        "em"
-
-      is_map(status["flood:#{channel}"]) ->
-        "flood"
-
-      is_map(status["smoke:#{channel}"]) ->
-        "smoke"
-
-      is_map(status["presence:#{channel}"]) ->
-        "presence"
-
-      is_map(status["temperature:#{channel}"]) or is_map(status["humidity:#{channel}"]) ->
-        "sensor"
-
-      is_map(status["voltmeter:#{channel}"]) ->
-        "sensor"
-
-      is_list(status["relays"]) and length(status["relays"]) > channel ->
-        "relay"
-
-      is_list(status["lights"]) and length(status["lights"]) > channel ->
-        "light"
-
-      is_list(status["rollers"]) and length(status["rollers"]) > channel ->
-        "cover"
-
-      is_list(status["emeters"]) and length(status["emeters"]) > channel ->
-        "em"
-
-      gen1_sensor?(status) ->
-        # Must agree with parse/4, which names the specific alarm: a
-        # caller that stores the parsed component and guards later
-        # events with this function would otherwise drop all of them.
-        gen1_sensor_component(status)
-
-      true ->
-        nil
+    case component_tag(status, channel) do
+      nil -> nil
+      tag -> tag_component(tag, status)
     end
   end
 
