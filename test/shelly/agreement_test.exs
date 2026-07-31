@@ -77,6 +77,55 @@ defmodule Shelly.AgreementTest do
     end
   end
 
+  describe "precedence between components sharing a channel" do
+    # Actuators outrank meters. This reclassifies 12 light-family/meter
+    # pairings relative to 0.2.x, where parse/4 answered with the meter
+    # and component_of/2 answered with the light — i.e. they disagreed.
+    # No known device emits these, but the resolution is a decision now,
+    # so it gets pinned rather than rediscovered.
+    for light <- ["cct", "rgb", "rgbw", "rgbcct"],
+        {meter_key, meter} <- [
+          {"pm1:0", %{"apower" => 5.0}},
+          {"em1:0", %{"act_power" => 5.0}},
+          {"em:0", %{"total_act_power" => 5.0}}
+        ] do
+      test "#{light} outranks #{meter_key}" do
+        payload = %{
+          unquote(meter_key) => unquote(Macro.escape(meter)),
+          "#{unquote(light)}:0" => %{"output" => true}
+        }
+
+        assert Status.component_of(payload, 0) == "light"
+        assert Status.parse(payload, 0, true).component == "light"
+        assert Status.parse(payload, 0, true).on == true
+      end
+    end
+
+    test "a meter still wins when no actuator is present" do
+      assert Status.component_of(%{"pm1:0" => %{"apower" => 5.0}}, 0) == "pm"
+      assert Status.component_of(%{"em1:0" => %{"act_power" => 5.0}}, 0) == "em"
+    end
+
+    test "a sensor never displaces the actuator on its channel" do
+      payload = %{"switch:0" => %{"output" => true}, "voltmeter:0" => %{"voltage" => 3.3}}
+
+      assert Status.component_of(payload, 0) == "switch"
+      assert Status.parse(payload, 0, true).on == true
+      # Enrichment carries battery, temperature and humidity across
+      # components — not voltage, which belongs to the component reporting it.
+      assert Status.parse(payload, 0, true).voltage == nil
+    end
+
+    test "between two sensors, the named one wins and keeps its reading" do
+      payload = %{"temperature:0" => %{"tC" => 20.0}, "voltmeter:0" => %{"voltage" => 3.3}}
+
+      assert Status.component_of(payload, 0) == "sensor"
+      parsed = Status.parse(payload, 0, true)
+      assert parsed.voltage == 3.3
+      assert parsed.temp_c == 20.0
+    end
+  end
+
   describe "the 3EM shape that dispatch order used to swallow" do
     # One relay, three emeters: channels 1 and 2 carry real power and
     # were parsed as an unmetered relay at 0 W.

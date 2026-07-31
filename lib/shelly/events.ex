@@ -41,19 +41,37 @@ defmodule Shelly.Events do
   Open the realtime socket for a client.
 
   Requires an OAuth token — the websocket has no auth-key equivalent.
-  Options: `:handler` (required, arity-1), `:name` (optional).
+
+  Options:
+
+    * `:handler` — required, arity-1, receives normalized events
+    * `:name` — optional process name
+    * `:known_ids` — optional; the device ids you already know. Pass them
+      and ambiguous ids resolve by lookup (see `normalize_device_id/2`),
+      which is the difference between a Gen1 device's events landing under
+      the right key or being silently unmatchable.
   """
   @spec start_link(Shelly.Client.t(), keyword()) ::
           {:ok, pid()} | {:error, :no_token | :invalid_server_url | term()}
   def start_link(client, opts \\ [])
 
-  def start_link(%Shelly.Client{token: token} = client, opts) when is_binary(token) do
+  def start_link(%Shelly.Client{} = client, opts) do
+    if Shelly.Client.oauth?(client), do: open_socket(client, opts), else: {:error, :no_token}
+  end
+
+  defp open_socket(%Shelly.Client{token: token} = client, opts) do
     handler = Keyword.fetch!(opts, :handler)
 
     host = URI.parse(client.server).host || client.server
     url = "wss://#{host}:6113/shelly/wss/hk_sock?t=#{token}"
 
-    state = %{handler: handler, label: host, attempt: 0, connected_at: nil}
+    state = %{
+      handler: handler,
+      label: host,
+      attempt: 0,
+      connected_at: nil,
+      known_ids: known_ids(opts)
+    }
 
     url
     |> WebSockex.start_link(
@@ -63,8 +81,6 @@ defmodule Shelly.Events do
     )
     |> sanitize_start_error()
   end
-
-  def start_link(%Shelly.Client{}, _opts), do: {:error, :no_token}
 
   # The connection URL carries the access token (Shelly's protocol), and
   # WebSockex.URLError embeds the URL it was given. Returning that
@@ -86,14 +102,25 @@ defmodule Shelly.Events do
   @impl true
   def handle_frame({:text, text}, state) do
     case Jason.decode(text) do
-      {:ok, message} -> dispatch(message, state)
-      _ -> :ok
+      {:ok, message} ->
+        dispatch(message, state)
+
+      _ ->
+        Logger.debug(fn ->
+          "Shelly.Events: dropped an undecodable text frame (#{state.label}, #{byte_size(text)} bytes)"
+        end)
     end
 
     {:ok, state}
   end
 
-  def handle_frame(_frame, state), do: {:ok, state}
+  def handle_frame(frame, state) do
+    Logger.debug(fn ->
+      "Shelly.Events: ignored a #{elem(frame, 0)} frame (#{state.label})"
+    end)
+
+    {:ok, state}
+  end
 
   @max_attempts 10
 
@@ -148,7 +175,7 @@ defmodule Shelly.Events do
   ## Event routing
 
   defp dispatch(%{"event" => "Shelly:StatusOnChange"} = message, state) do
-    with id when is_binary(id) <- device_id(message),
+    with id when is_binary(id) <- device_id(message, state),
          %{} = status <- message["status"] do
       safe_call(state.handler, {:status, id, status})
     else
@@ -157,7 +184,7 @@ defmodule Shelly.Events do
   end
 
   defp dispatch(%{"event" => "Shelly:Online"} = message, state) do
-    with id when is_binary(id) <- device_id(message),
+    with id when is_binary(id) <- device_id(message, state),
          online when is_boolean(online) <- online_flag(message) do
       safe_call(state.handler, {:online, id, online})
     else
@@ -199,7 +226,20 @@ defmodule Shelly.Events do
     :ok
   end
 
-  defp device_id(message), do: normalize_device_id(raw_device_id(message))
+  # Resolve against the caller's device list when they gave us one: that
+  # is the only way to settle an id whose decimal rendering is itself a
+  # valid hex id (~5% of Gen1 devices).
+  defp device_id(message, %{known_ids: known}) when known != nil,
+    do: normalize_device_id(raw_device_id(message), known)
+
+  defp device_id(message, _state), do: normalize_device_id(raw_device_id(message))
+
+  defp known_ids(opts) do
+    case Keyword.get(opts, :known_ids) do
+      nil -> nil
+      ids -> MapSet.new(ids, &to_string/1)
+    end
+  end
 
   # A scalar "device" value used to raise inside get_in/2 — outside
   # safe_call's rescue, so it killed the socket process.
@@ -265,10 +305,15 @@ defmodule Shelly.Events do
   def normalize_device_id(id) when is_binary(id) do
     id = String.trim(id)
 
-    if decimal_form?(id) do
-      id |> String.to_integer() |> normalize_device_id()
-    else
-      String.downcase(id)
+    cond do
+      id == "" ->
+        nil
+
+      decimal_form?(id) ->
+        id |> String.to_integer() |> normalize_device_id()
+
+      true ->
+        String.downcase(id)
     end
   end
 
@@ -293,7 +338,12 @@ defmodule Shelly.Events do
   """
   @spec normalize_device_id(String.t() | integer() | term(), Enumerable.t()) :: String.t() | nil
   def normalize_device_id(id, known_ids) do
-    known = MapSet.new(known_ids, &String.downcase/1)
+    # Accepts anything enumerable, including the map `Shelly.Account`
+    # returns — its keys are the ids.
+    known =
+      known_ids
+      |> normalize_known()
+      |> MapSet.new()
 
     case candidates(id) do
       [primary] ->
@@ -306,6 +356,16 @@ defmodule Shelly.Events do
           true -> primary
         end
     end
+  end
+
+  defp normalize_known(%{} = ids) when not is_struct(ids), do: normalize_known(Map.keys(ids))
+
+  defp normalize_known(ids) do
+    ids
+    |> Enum.map(fn
+      id when is_binary(id) -> String.downcase(id)
+      id -> id |> to_string() |> String.downcase()
+    end)
   end
 
   # Both readings of an ambiguous id, likeliest first; one reading

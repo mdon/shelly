@@ -52,9 +52,11 @@ defmodule Shelly.CloudV1 do
     end
   end
 
-  defp post(%Shelly.Client{auth_key: nil}, _path, _form), do: {:error, :no_auth_key}
-
   defp post(conn, path, form) do
+    if Shelly.Client.keyed?(conn), do: do_post(conn, path, form), else: {:error, :no_auth_key}
+  end
+
+  defp do_post(conn, path, form) do
     Shelly.RateGate.run(Shelly.Client.rate_key(conn), fn ->
       Shelly.HTTP.request(
         [

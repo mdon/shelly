@@ -263,10 +263,31 @@ defmodule Shelly.Status do
   def gen_to_int(n) when is_integer(n), do: n
   def gen_to_int(_), do: nil
 
+  ## Total accessors ------------------------------------------------------
+  #
+  # Device payloads are JSON from a network, so any key can hold anything.
+  # `parse/4` promises a status for every input, and these keep that
+  # promise: a scalar where a map was expected reads as absent rather than
+  # raising in the caller's process.
+
+  defp as_map(value) when is_map(value), do: value
+  defp as_map(_value), do: %{}
+
+  defp as_list(value) when is_list(value), do: value
+  defp as_list(_value), do: []
+
+  # get_in/2 for payloads: any non-map link in the chain means "absent".
+  defp dig(value, keys), do: Enum.reduce(keys, value, &fetch_key/2)
+
+  defp fetch_key(key, value) when is_map(value), do: Map.get(value, key)
+  defp fetch_key(_key, _value), do: nil
+
+  defp at(list, index), do: list |> as_list() |> Enum.at(index) |> as_map()
+
   ## Gen2+ components -----------------------------------------------------
 
   defp parse_switch(status, channel, online) do
-    sw = status["switch:#{channel}"]
+    sw = as_map(status["switch:#{channel}"])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
@@ -274,8 +295,8 @@ defmodule Shelly.Status do
       watts: to_float(sw["apower"]),
       voltage: opt_float(sw["voltage"]),
       current: opt_float(sw["current"]),
-      energy_wh: opt_float(get_in(sw, ["aenergy", "total"])),
-      temp_c: opt_float(get_in(sw, ["temperature", "tC"])),
+      energy_wh: opt_float(dig(sw, ["aenergy", "total"])),
+      temp_c: opt_float(dig(sw, ["temperature", "tC"])),
       source: opt_string(sw["source"]),
       metered: is_number(sw["apower"]),
       component: "switch"
@@ -283,7 +304,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_cover(status, channel, online) do
-    cover = status["cover:#{channel}"]
+    cover = as_map(status["cover:#{channel}"])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
@@ -291,8 +312,8 @@ defmodule Shelly.Status do
       watts: to_float(cover["apower"]),
       voltage: opt_float(cover["voltage"]),
       current: opt_float(cover["current"]),
-      energy_wh: opt_float(get_in(cover, ["aenergy", "total"])),
-      temp_c: opt_float(get_in(cover, ["temperature", "tC"])),
+      energy_wh: opt_float(dig(cover, ["aenergy", "total"])),
+      temp_c: opt_float(dig(cover, ["temperature", "tC"])),
       source: opt_string(cover["source"]),
       metered: is_number(cover["apower"]),
       component: "cover"
@@ -300,7 +321,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_light(status, channel, online) do
-    light = status["light:#{channel}"]
+    light = as_map(status["light:#{channel}"])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
@@ -308,8 +329,8 @@ defmodule Shelly.Status do
       watts: to_float(light["apower"]),
       voltage: opt_float(light["voltage"]),
       current: opt_float(light["current"]),
-      energy_wh: opt_float(get_in(light, ["aenergy", "total"])),
-      temp_c: opt_float(get_in(light, ["temperature", "tC"])),
+      energy_wh: opt_float(dig(light, ["aenergy", "total"])),
+      temp_c: opt_float(dig(light, ["temperature", "tC"])),
       source: opt_string(light["source"]),
       metered: is_number(light["apower"]),
       component: "light"
@@ -319,7 +340,7 @@ defmodule Shelly.Status do
   # PM Mini class: measures a circuit, cannot switch it. `on` is
   # meaningless — kept false; the data is the wattage.
   defp parse_pm1(status, channel, online) do
-    pm = status["pm1:#{channel}"]
+    pm = as_map(status["pm1:#{channel}"])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
@@ -327,7 +348,7 @@ defmodule Shelly.Status do
       watts: to_float(pm["apower"]),
       voltage: opt_float(pm["voltage"]),
       current: opt_float(pm["current"]),
-      energy_wh: opt_float(get_in(pm, ["aenergy", "total"])),
+      energy_wh: opt_float(dig(pm, ["aenergy", "total"])),
       metered: is_number(pm["apower"]),
       component: "pm"
     })
@@ -335,7 +356,7 @@ defmodule Shelly.Status do
 
   # Pro 3EM single-phase channels.
   defp parse_em1(status, channel, online) do
-    em = status["em1:#{channel}"]
+    em = as_map(status["em1:#{channel}"])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
@@ -344,8 +365,8 @@ defmodule Shelly.Status do
       voltage: opt_float(em["voltage"]),
       current: opt_float(em["current"]),
       energy_wh:
-        opt_float(get_in(em, ["aenergy", "total"])) ||
-          opt_float(get_in(status, ["em1data:#{channel}", "total_act_energy"])),
+        opt_float(dig(em, ["aenergy", "total"])) ||
+          opt_float(dig(status, ["em1data:#{channel}", "total_act_energy"])),
       metered: is_number(em["act_power"] || em["apower"]),
       component: "em"
     })
@@ -353,22 +374,22 @@ defmodule Shelly.Status do
 
   # Pro 3EM three-phase aggregate.
   defp parse_em(status, online) do
-    em = status["em:0"]
+    em = as_map(status["em:0"])
 
     rpc_common(status, online, 0)
     |> Map.merge(%{
       on: false,
       watts: to_float(em["total_act_power"]),
       current: opt_float(em["total_current"]),
-      energy_wh: opt_float(get_in(status, ["emdata:0", "total_act"])),
+      energy_wh: opt_float(dig(status, ["emdata:0", "total_act"])),
       metered: is_number(em["total_act_power"]),
       component: "em"
     })
   end
 
   defp rpc_common(status, online, channel) do
-    wifi = status["wifi"] || %{}
-    input = status["input:#{channel}"] || %{}
+    wifi = as_map(status["wifi"])
+    input = as_map(status["input:#{channel}"])
 
     %{
       online: online,
@@ -417,7 +438,7 @@ defmodule Shelly.Status do
   ## Gen1 arrays -----------------------------------------------------------
 
   defp parse_gen1_relay(status, channel, online) do
-    relay = Enum.at(status["relays"] || [], channel) || %{}
+    relay = at(status["relays"], channel)
     meter = gen1_meter(status["meters"], channel)
 
     gen1_common(status, channel, online)
@@ -433,7 +454,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_gen1_light(status, channel, online) do
-    light = Enum.at(status["lights"] || [], channel) || %{}
+    light = at(status["lights"], channel)
     meter = gen1_meter(status["meters"], channel)
 
     gen1_common(status, channel, online)
@@ -447,7 +468,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_gen1_roller(status, channel, online) do
-    roller = Enum.at(status["rollers"] || [], channel) || %{}
+    roller = at(status["rollers"], channel)
     meter = gen1_meter(status["meters"], channel)
 
     watts = roller["power"] || (meter && meter["power"])
@@ -463,7 +484,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_gen1_emeter(status, channel, online) do
-    emeter = Enum.at(status["emeters"] || [], channel) || %{}
+    emeter = at(status["emeters"], channel)
 
     gen1_common(status, channel, online)
     |> Map.merge(%{
@@ -481,8 +502,8 @@ defmodule Shelly.Status do
   # lone meter covers whichever channel asked for it.
   defp gen1_meter(meters, channel) when is_list(meters) do
     case Enum.at(meters, channel) do
-      nil -> if length(meters) == 1, do: List.first(meters)
-      meter -> meter
+      nil -> if length(meters) == 1, do: as_map(List.first(meters))
+      meter -> as_map(meter)
     end
   end
 
@@ -493,12 +514,16 @@ defmodule Shelly.Status do
   defp roller_open?(%{"current_pos" => position}) when is_number(position) and position >= 0,
     do: position > 0
 
-  defp roller_open?(%{"state" => state}), do: state == "open"
+  defp roller_open?(%{"state" => "open"}), do: true
+  defp roller_open?(%{"state" => state}) when state in ["close", "closed"], do: false
+  # "stop"/"stopped"/"calibrating" say where the motor is, not where the
+  # blind is — and Gen2 covers answer `true` for exactly these, so a
+  # confident `false` here made the generations contradict each other.
   defp roller_open?(_roller), do: nil
 
   defp gen1_common(status, channel, online) do
-    wifi = status["wifi_sta"] || %{}
-    input = Enum.at(status["inputs"] || [], channel) || %{}
+    wifi = as_map(status["wifi_sta"])
+    input = at(status["inputs"], channel)
 
     %{
       online: online,
@@ -507,7 +532,7 @@ defmodule Shelly.Status do
       voltage: opt_float(status["voltage"]),
       current: nil,
       energy_wh: nil,
-      temp_c: opt_float(get_in(status, ["tmp", "tC"]) || numeric(status["temperature"])),
+      temp_c: opt_float(dig(status, ["tmp", "tC"]) || numeric(status["temperature"])),
       rssi: opt_int(wifi["rssi"]),
       input_state: gen1_input(input["input"]),
       source: nil,
@@ -531,7 +556,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_light_family(status, channel, online) do
-    light = status[light_family_key(status, channel)]
+    light = as_map(status[light_family_key(status, channel)])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{
@@ -539,7 +564,7 @@ defmodule Shelly.Status do
       watts: to_float(light["apower"]),
       voltage: opt_float(light["voltage"]),
       current: opt_float(light["current"]),
-      energy_wh: opt_float(get_in(light, ["aenergy", "total"])),
+      energy_wh: opt_float(dig(light, ["aenergy", "total"])),
       source: opt_string(light["source"]),
       metered: is_number(light["apower"]),
       component: "light"
@@ -548,7 +573,7 @@ defmodule Shelly.Status do
 
   # Flood / smoke sensors: "on" = alarm ringing. Honest and useful.
   defp parse_alarm(status, kind, channel, online) do
-    sensor = status["#{kind}:#{channel}"]
+    sensor = as_map(status["#{kind}:#{channel}"])
 
     # A delta naming the component without its alarm key says nothing
     # about the alarm. Reporting `false` there tells a consumer the smoke
@@ -558,7 +583,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_presence(status, channel, online) do
-    presence = status["presence:#{channel}"]
+    presence = as_map(status["presence:#{channel}"])
 
     detected =
       case {numeric(presence["num_objects"]), presence["presence"]} do
@@ -579,7 +604,7 @@ defmodule Shelly.Status do
   end
 
   defp parse_voltmeter(status, channel, online) do
-    volt = status["voltmeter:#{channel}"]
+    volt = as_map(status["voltmeter:#{channel}"])
 
     rpc_common(status, online, channel)
     |> Map.merge(%{voltage: opt_float(volt["voltage"]), component: "sensor"})
@@ -640,20 +665,20 @@ defmodule Shelly.Status do
   # component itself carried none.
   defp enrich(parsed, status, channel) do
     battery =
-      opt_int(get_in(status, ["devicepower:#{channel}", "battery", "percent"])) ||
-        opt_int(get_in(status, ["devicepower:0", "battery", "percent"])) ||
-        opt_int(get_in(status, ["bat", "value"]))
+      opt_int(dig(status, ["devicepower:#{channel}", "battery", "percent"])) ||
+        opt_int(dig(status, ["devicepower:0", "battery", "percent"])) ||
+        opt_int(dig(status, ["bat", "value"]))
 
     temp =
       parsed[:temp_c] ||
-        opt_float(get_in(status, ["temperature:#{channel}", "tC"])) ||
-        opt_float(get_in(status, ["temperature:0", "tC"])) ||
-        opt_float(get_in(status, ["tmp", "tC"]))
+        opt_float(dig(status, ["temperature:#{channel}", "tC"])) ||
+        opt_float(dig(status, ["temperature:0", "tC"])) ||
+        opt_float(dig(status, ["tmp", "tC"]))
 
     humidity =
-      opt_float(get_in(status, ["humidity:#{channel}", "rh"])) ||
-        opt_float(get_in(status, ["humidity:0", "rh"])) ||
-        opt_float(get_in(status, ["hum", "value"]))
+      opt_float(dig(status, ["humidity:#{channel}", "rh"])) ||
+        opt_float(dig(status, ["humidity:0", "rh"])) ||
+        opt_float(dig(status, ["hum", "value"]))
 
     parsed
     |> Map.put(:battery, battery)
@@ -679,7 +704,9 @@ defmodule Shelly.Status do
 
   defp unknown_status(raw, online) do
     %{
-      on: false,
+      # Nothing in this payload spoke for the channel, so its state is
+      # not known — the same stance every named component takes.
+      on: nil,
       online: online,
       watts: 0.0,
       voltage: nil,

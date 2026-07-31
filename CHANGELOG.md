@@ -76,13 +76,69 @@ which is now a standing note in `AGENTS.md`.
   silently disabling pacing, and an invalid global `:req_options` is
   logged rather than discarded.
 
+### Fixed (second review round)
+
+- **`Shelly.Status.parse/4` is total again.** It is spec'd to return a
+  status for any input, and its own documented guard (`has_component?/2`)
+  passed payloads through that then raised: a scalar where a nested map
+  was expected — `"bat" => 87`, `"wifi" => 1`, `"aenergy" => 5` — reached
+  `Access.get/3`. Every nested read now goes through total accessors, so
+  a malformed payload reads as absent instead of crashing the caller.
+  This affected `Account.parse_status/2` and both auth-key clients, where
+  nothing rescued it.
+- **Empty and whitespace-only credentials no longer reach the wire.** The
+  predicates rejected them; all four transports and `Events.start_link/2`
+  still guarded only `nil`, so `Authorization: "Bearer "` and `auth_key=`
+  were being sent. The 0.3.0 entry below claiming this was fixed was
+  therefore only half true — the predicates were, the transports weren't.
+- **`OAuth.exchange_code/2` no longer raises on a non-object JWT payload.**
+  `peek_jwt/1` returned any decoded JSON term, so a token whose payload
+  was a string or a list crashed the grant instead of erroring.
+- **An unnamed component reports `on: nil`, not `false`.** The
+  unknown-vs-off principle now holds one level further out: a payload that
+  names nothing for the channel — a battery-only delta, the commonest
+  partial there is — no longer claims the device is off.
+- **A Gen1 roller in an unrecognized state reports `nil`.** `"stop"`,
+  `"stopped"` and `"calibrating"` were reported as closed, while Gen2
+  covers report exactly those as open — the two generations contradicted
+  each other on the same physical state.
+- `Events.normalize_device_id/1` returns `nil` for a blank id rather than
+  `""`, which was being delivered to handlers as a device.
+- `CloudV2.get_statuses/2` drops elements with no usable id instead of
+  collapsing them all under `""`, where every one but the last was lost.
+- Per-call `:req_options` are validated and reported like the global ones,
+  rather than being silently discarded.
+- IPv6 server addresses survive normalization; `expires_at` accepts a
+  float `exp` (legal JSON, and it made a token look non-expiring).
+
+### Changed (second review round)
+
+- `Shelly.OAuth.authorize_url/2` **raises** when `:state` is present but
+  not a non-empty string. Omitting it is a documented choice; passing an
+  unusable one silently produced a URL with no CSRF binding while the
+  caller believed otherwise. The 0.2.x positional `client_id` form is
+  removed — 0.3.0 breaks every other entry point, so a compatibility shim
+  for one function was inconsistent.
+- `Shelly.Events.start_link/2` accepts **`:known_ids`**, which resolves
+  the ambiguous device ids `normalize_device_id/2` was added for. Without
+  it that escape hatch wasn't reachable from the socket — the one place
+  the ambiguity actually bites.
+- `Shelly.Client.new/1` **raises** on a server with no host (`""`,
+  `"wss://"`, `":::"`), where 0.2.x returned the string verbatim and
+  failed later, somewhere less obvious.
+
 ### Changed
 
 - **Component precedence is now explicit**: actuators, then meters, then
-  sensors. Previously `parse/4` and `component_of/2` enumerated device
-  classes separately and disagreed for payloads naming several components
-  on one channel (no known device emits these). A differential over the
-  pre-refactor parser confirms every other resolution is unchanged.
+  sensors. The order was previously an accident of which entries fitted a
+  lookup table. Concretely this **reclassifies 12 pairings**: a
+  light-family component (`cct`/`rgb`/`rgbw`/`rgbcct`) on a channel now
+  wins over `pm1`, `em1` and `em:0`, which aligns `parse/4` with what
+  `component_of/2` already answered before 0.2.1 unified them. No known
+  device emits these overlaps; all 12 are pinned in
+  `test/shelly/agreement_test.exs`. A differential against the
+  pre-refactor parser over 192 payload/channel combinations shows no
+  other resolution changed.
 - `Shelly.Client`'s expiry predicate is now **`token_expired?/1`**. The semantics
   are deliberate — a key-only client answers `true` and is nonetheless
   fully functional, which is what makes `if token_expired?, do: CloudV2,
@@ -96,7 +152,10 @@ which is now a standing note in `AGENTS.md`.
   length alone cannot (~5% of Gen1 ids) against a set of ids you already
   know.
 
-## v0.2.1
+## v0.2.1 — tagged, never published
+
+*(hex went from 0.2.0 straight to 0.3.0; this section is kept because
+0.3.0's notes refer back to it.)*
 
 A pre-publish review (six external models plus a verification pass against
 Shelly's own API docs) found that the decimal-id fix this release was

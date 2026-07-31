@@ -38,7 +38,16 @@ defmodule Shelly.CloudV2 do
 
     case post_json(conn, "/v2/devices/api/get", body) do
       {:ok, %{status: 200, body: elements}} when is_list(elements) ->
-        {:ok, Map.new(elements, fn el -> {String.downcase(el["id"] || ""), el} end)}
+        # An element without a usable id can't be looked up by one;
+        # keying it as "" silently dropped every such element but the last.
+        {:ok,
+         for(
+           element <- elements,
+           id = element_id(element),
+           id != nil,
+           into: %{},
+           do: {id, element}
+         )}
 
       other ->
         error(other)
@@ -102,12 +111,25 @@ defmodule Shelly.CloudV2 do
   defp command_result({:ok, %{status: 200} = response}), do: error({:ok, response})
   defp command_result(other), do: error(other)
 
+  defp element_id(%{"id" => id}) when is_binary(id) do
+    case String.trim(id) do
+      "" -> nil
+      trimmed -> String.downcase(trimmed)
+    end
+  end
+
+  defp element_id(_element), do: nil
+
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp post_json(%Shelly.Client{auth_key: nil}, _path, _body), do: {:error, :no_auth_key}
-
   defp post_json(conn, path, body) do
+    if Shelly.Client.keyed?(conn),
+      do: do_post_json(conn, path, body),
+      else: {:error, :no_auth_key}
+  end
+
+  defp do_post_json(conn, path, body) do
     Shelly.RateGate.run(Shelly.Client.rate_key(conn), fn ->
       Shelly.HTTP.request(
         [

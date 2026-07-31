@@ -134,9 +134,11 @@ defmodule Shelly.Account do
   defp online?(%{"_dev_info" => %{"online" => online}}), do: online in [1, "true"]
   defp online?(status), do: get_in(status, ["cloud", "connected"]) == true
 
-  defp post(%Shelly.Client{token: nil}, _path, _form), do: {:error, :no_token}
-
   defp post(%Shelly.Client{} = client, path, form) do
+    if Shelly.Client.oauth?(client), do: do_post(client, path, form), else: {:error, :no_token}
+  end
+
+  defp do_post(%Shelly.Client{} = client, path, form) do
     case Shelly.RateGate.run(Shelly.Client.rate_key(client), fn ->
            Shelly.HTTP.request(
              [

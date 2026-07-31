@@ -89,9 +89,25 @@ defmodule Shelly.ClientsEdgeTest do
 
   describe "OAuth" do
     test "authorize_url carries the client and redirect" do
-      url = Shelly.OAuth.authorize_url("https://app.example/cb", "custom-client")
+      url = Shelly.OAuth.authorize_url("https://app.example/cb", client_id: "custom-client")
       assert url =~ "client_id=custom-client"
       assert url =~ URI.encode_www_form("https://app.example/cb")
+    end
+
+    test "state is passed through, and a broken one is refused rather than dropped" do
+      url = Shelly.OAuth.authorize_url("https://app.example/cb", state: "abc123")
+      assert url =~ "state=abc123"
+
+      # Omitting it is a documented choice.
+      refute Shelly.OAuth.authorize_url("https://app.example/cb") =~ "state="
+
+      # Passing an unusable one would produce a URL with no CSRF binding
+      # while the caller believed otherwise.
+      for invalid <- [nil, "", 12_345] do
+        assert_raise ArgumentError, fn ->
+          Shelly.OAuth.authorize_url("https://app.example/cb", state: invalid)
+        end
+      end
     end
 
     test "a server claim that isn't a Shelly host falls back instead of trusting it" do

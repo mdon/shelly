@@ -113,11 +113,11 @@ defmodule Shelly.Client do
 
   @doc "Can this client use the OAuth paths (account API, websocket)?"
   @spec oauth?(t()) :: boolean()
-  def oauth?(%__MODULE__{token: token}), do: is_binary(token) and token != ""
+  def oauth?(%__MODULE__{token: token}), do: usable_credential?(token)
 
   @doc "Can this client use the auth-key paths (v2/v1)?"
   @spec keyed?(t()) :: boolean()
-  def keyed?(%__MODULE__{auth_key: auth_key}), do: is_binary(auth_key) and auth_key != ""
+  def keyed?(%__MODULE__{auth_key: auth_key}), do: usable_credential?(auth_key)
 
   @doc """
   Is this client's OAuth token unusable — absent or past its expiry?
@@ -134,8 +134,11 @@ defmodule Shelly.Client do
   when you store the token.
   """
   @spec token_expired?(t()) :: boolean()
-  def token_expired?(%__MODULE__{token: token}) when token in [nil, ""], do: true
-  def token_expired?(%__MODULE__{expires_at: nil}), do: false
+  def token_expired?(%__MODULE__{token: token}) when not is_binary(token), do: true
+  def token_expired?(%__MODULE__{token: token}) when byte_size(token) == 0, do: true
+
+  def token_expired?(%__MODULE__{expires_at: nil} = client),
+    do: not usable_credential?(client.token)
 
   def token_expired?(%__MODULE__{expires_at: expires_at}),
     do: DateTime.compare(expires_at, DateTime.utc_now()) != :gt
@@ -158,12 +161,17 @@ defmodule Shelly.Client do
   # Normalizes to https://host[:port]. The port is kept — dropping it
   # silently redirected anything on a non-default port (a proxy, a local
   # test server) to 443.
+  # Blank is not a credential — and neither is whitespace, which is what
+  # a mis-trimmed environment variable or a copy-pasted key looks like.
+  defp usable_credential?(value) when is_binary(value), do: String.trim(value) != ""
+  defp usable_credential?(_value), do: false
+
   defp normalize_server(server) when is_binary(server) do
     uri = URI.parse(if String.contains?(server, "://"), do: server, else: "https://" <> server)
 
     case uri.host do
       host when is_binary(host) and host != "" ->
-        "https://" <> String.downcase(host) <> port_suffix(uri)
+        "https://" <> render_host(String.downcase(host)) <> port_suffix(uri)
 
       _ ->
         raise ArgumentError, "Shelly.Client could not read a host from server: #{inspect(server)}"
@@ -179,5 +187,11 @@ defmodule Shelly.Client do
   # carrying that onto an https URL sends every request to :80.
   defp port_suffix(%URI{port: port, scheme: scheme}) do
     if is_nil(port) or port == URI.default_port(scheme || "https"), do: "", else: ":#{port}"
+  end
+
+  # URI.parse strips the brackets from an IPv6 host; without them back the
+  # authority is unparseable.
+  defp render_host(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
   end
 end

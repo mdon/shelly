@@ -73,17 +73,23 @@ defmodule Shelly.OAuth do
     ]
 
     query =
-      case Keyword.get(opts, :state) do
-        state when is_binary(state) and state != "" -> query ++ [state: state]
-        _ -> query
+      case Keyword.fetch(opts, :state) do
+        :error ->
+          query
+
+        {:ok, state} when is_binary(state) and state != "" ->
+          query ++ [state: state]
+
+        {:ok, invalid} ->
+          # Omitting :state is a documented choice; passing an unusable
+          # one is a mistake that would silently produce a URL with no
+          # CSRF binding at all.
+          raise ArgumentError,
+                ":state must be a non-empty string, got: #{inspect(invalid)}"
       end
 
     @login_url <> "?" <> URI.encode_query(query)
   end
-
-  # Kept for the 0.2.x positional form, which passed a client id.
-  def authorize_url(redirect_uri, client_id) when is_binary(client_id),
-    do: authorize_url(redirect_uri, client_id: client_id)
 
   @doc """
   Exchange an authorization code for an access token.
@@ -144,8 +150,17 @@ defmodule Shelly.OAuth do
           {:ok, Shelly.Client.t()} | {:error, :refresh_unsupported | :no_token | term()}
   def refresh(account, client_id \\ @default_client_id)
 
-  def refresh(%Shelly.Client{server: server, token: token} = client, client_id)
-      when is_binary(token) do
+  def refresh(%Shelly.Client{server: server, token: token} = client, client_id) do
+    if Shelly.Client.oauth?(client) do
+      do_refresh(client, server, token, client_id)
+    else
+      {:error, :no_token}
+    end
+  end
+
+  def refresh(_client, _client_id), do: {:error, :no_token}
+
+  defp do_refresh(client, server, token, client_id) do
     refresh_token = client.refresh_token || token
 
     result =
@@ -189,8 +204,6 @@ defmodule Shelly.OAuth do
     end
   end
 
-  def refresh(_client, _client_id), do: {:error, :no_token}
-
   defp token_result(token, body, server, previous \\ nil) do
     claims = peek_jwt(token) || %{}
     api_url = normalize_url(claims["user_api_url"] || server)
@@ -222,8 +235,8 @@ defmodule Shelly.OAuth do
 
   defp carried_over(_previous), do: []
 
-  defp expires_at(%{"exp" => exp}) when is_integer(exp) do
-    case DateTime.from_unix(exp) do
+  defp expires_at(%{"exp" => exp}) when is_number(exp) do
+    case DateTime.from_unix(trunc(exp)) do
       {:ok, datetime} -> datetime
       _ -> nil
     end
@@ -236,7 +249,9 @@ defmodule Shelly.OAuth do
   def peek_jwt(token) when is_binary(token) do
     with [_, payload, _] <- String.split(token, "."),
          {:ok, json} <- Base.url_decode64(payload, padding: false),
-         {:ok, map} <- Jason.decode(json) do
+         # A payload decoding to a string or a list is valid JSON and not
+         # claims; without this guard the caller raised on claims["email"].
+         {:ok, map} when is_map(map) <- Jason.decode(json) do
       map
     else
       _ -> nil
@@ -279,7 +294,7 @@ defmodule Shelly.OAuth do
 
     if is_binary(host) and String.ends_with?(host, ".shelly.cloud") do
       # Keep a non-default port, the same rule Shelly.Client applies.
-      "https://" <> host <> port_suffix(uri)
+      "https://" <> render_host(host) <> port_suffix(uri)
     else
       Logger.debug(fn -> "Shelly.OAuth: server claim #{inspect(url)} is not a Shelly host" end)
       @fallback_server
@@ -290,5 +305,11 @@ defmodule Shelly.OAuth do
 
   defp port_suffix(%URI{port: port, scheme: scheme}) do
     if is_nil(port) or port == URI.default_port(scheme || "https"), do: "", else: ":#{port}"
+  end
+
+  # URI.parse strips the brackets from an IPv6 host; without them back the
+  # authority is unparseable.
+  defp render_host(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
   end
 end
