@@ -1,16 +1,11 @@
 defmodule Shelly.OAuthTest do
-  use ExUnit.Case, async: false
+  # No global config: every request carries its own options, so these run
+  # concurrently.
+  use ExUnit.Case, async: true
 
-  # Requests are answered in-process through Req's `:plug` option, wired in
-  # via the :req_options application env seam.
-  setup do
-    on_exit(fn -> Application.delete_env(:shelly, :req_options) end)
-    :ok
-  end
+  defp stub(fun), do: Process.put(:stub, fun)
 
-  defp stub(fun) do
-    Application.put_env(:shelly, :req_options, plug: fun)
-  end
+  defp opts, do: [req_options: [plug: Process.get(:stub)]]
 
   defp respond(conn, status, body) do
     conn
@@ -43,7 +38,8 @@ defmodule Shelly.OAuthTest do
 
       assert {:ok, result} =
                Shelly.OAuth.exchange_code(
-                 jwt(%{"user_api_url" => "https://shelly-74-eu.shelly.cloud"})
+                 jwt(%{"user_api_url" => "https://shelly-74-eu.shelly.cloud"}),
+                 opts()
                )
 
       assert result.token == token
@@ -57,7 +53,7 @@ defmodule Shelly.OAuthTest do
 
       stub(fn conn -> respond(conn, 200, %{"data" => %{"code" => token}}) end)
 
-      assert {:ok, result} = Shelly.OAuth.exchange_code(token)
+      assert {:ok, result} = Shelly.OAuth.exchange_code(token, opts())
       assert result.refresh_token == nil
       assert result.expires_at == nil
     end
@@ -79,7 +75,8 @@ defmodule Shelly.OAuthTest do
         Shelly.Client.new(
           server: "https://shelly-74-eu.shelly.cloud",
           token: account_token(),
-          refresh_token: "stored-refresh"
+          refresh_token: "stored-refresh",
+          req_options: [plug: Process.get(:stub)]
         )
 
       assert {:ok, result} = Shelly.OAuth.refresh(account)
@@ -97,7 +94,11 @@ defmodule Shelly.OAuthTest do
       end)
 
       account =
-        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: "the-access-token")
+        Shelly.Client.new(
+          server: "https://shelly-74-eu.shelly.cloud",
+          token: "the-access-token",
+          req_options: [plug: Process.get(:stub)]
+        )
 
       assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
     end
@@ -106,7 +107,11 @@ defmodule Shelly.OAuthTest do
       stub(fn conn -> respond(conn, 400, %{"error" => "unsupported_grant_type"}) end)
 
       account =
-        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
+        Shelly.Client.new(
+          server: "https://shelly-74-eu.shelly.cloud",
+          token: account_token(),
+          req_options: [plug: Process.get(:stub)]
+        )
 
       assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
     end
@@ -117,7 +122,11 @@ defmodule Shelly.OAuthTest do
       stub(fn conn -> respond(conn, 200, %{"isok" => true}) end)
 
       account =
-        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
+        Shelly.Client.new(
+          server: "https://shelly-74-eu.shelly.cloud",
+          token: account_token(),
+          req_options: [plug: Process.get(:stub)]
+        )
 
       assert Shelly.OAuth.refresh(account) == {:error, :no_token_in_response}
     end
@@ -126,7 +135,11 @@ defmodule Shelly.OAuthTest do
       stub(fn conn -> respond(conn, 200, %{"access_token" => ""}) end)
 
       account =
-        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
+        Shelly.Client.new(
+          server: "https://shelly-74-eu.shelly.cloud",
+          token: account_token(),
+          req_options: [plug: Process.get(:stub)]
+        )
 
       assert Shelly.OAuth.refresh(account) == {:error, :no_token_in_response}
     end
@@ -135,7 +148,11 @@ defmodule Shelly.OAuthTest do
       stub(fn conn -> respond(conn, 503, %{"error" => "maintenance"}) end)
 
       account =
-        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
+        Shelly.Client.new(
+          server: "https://shelly-74-eu.shelly.cloud",
+          token: account_token(),
+          req_options: [plug: Process.get(:stub)]
+        )
 
       assert {:error, {:oauth_http, 503, _}} = Shelly.OAuth.refresh(account)
     end

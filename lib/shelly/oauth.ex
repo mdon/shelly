@@ -16,7 +16,9 @@ defmodule Shelly.OAuth do
     1. Send the user to `authorize_url/2` (their popup shows Shelly's
        own login).
     2. Shelly redirects to your `redirect_uri` with a `code` param.
-    3. `exchange_code/2` swaps it for an access token.
+    3. `exchange_code/2` swaps it for an access token. Its options are
+       `:client_id` and `:req_options` (merged into the request — a proxy,
+       custom timeouts, or a stub in tests).
 
   The token authorizes the account API (`Shelly.Account`) as an
   `Authorization: Bearer` header and the real-time websocket
@@ -102,17 +104,22 @@ defmodule Shelly.OAuth do
   **Persist `:expires_at` and `:refresh_token`** — an access token that
   looks permanent stops working 12 hours in.
   """
-  @spec exchange_code(String.t(), String.t()) :: {:ok, Shelly.Client.t()} | {:error, term()}
-  def exchange_code(code, client_id \\ @default_client_id) when is_binary(code) do
+  @spec exchange_code(String.t(), keyword()) :: {:ok, Shelly.Client.t()} | {:error, term()}
+  def exchange_code(code, opts \\ []) when is_binary(code) and is_list(opts) do
+    client_id = Keyword.get(opts, :client_id, @default_client_id)
+    req_options = Keyword.get(opts, :req_options, [])
     server = server_from_jwt(code) || @fallback_server
 
     result =
       Shelly.HTTP.request(
-        method: :post,
-        url: server <> "/oauth/auth",
-        form: [grant_type: "code", code: code, client_id: client_id],
-        receive_timeout: 15_000,
-        retry: false
+        [
+          method: :post,
+          url: server <> "/oauth/auth",
+          form: [grant_type: "code", code: code, client_id: client_id],
+          receive_timeout: 15_000,
+          retry: false
+        ],
+        %{req_options: req_options}
       )
 
     with {:ok, %{status: 200, body: body}} <- result,
@@ -301,7 +308,7 @@ defmodule Shelly.OAuth do
     uri = URI.parse(if String.contains?(url, "://"), do: url, else: "https://" <> url)
     host = if is_binary(uri.host), do: String.downcase(uri.host)
 
-    if is_binary(host) and String.ends_with?(host, ".shelly.cloud") do
+    if shelly_host?(host) do
       # Keep a non-default port, the same rule Shelly.Client applies.
       "https://" <> render_host(host) <> port_suffix(uri)
     else
@@ -311,6 +318,13 @@ defmodule Shelly.OAuth do
   end
 
   defp normalize_url(_url), do: @fallback_server
+
+  # The apex is as much a Shelly host as its subdomains; the suffix test
+  # alone rejected it and silently rerouted to the fallback server.
+  defp shelly_host?(host) when is_binary(host),
+    do: host == "shelly.cloud" or String.ends_with?(host, ".shelly.cloud")
+
+  defp shelly_host?(_host), do: false
 
   defp port_suffix(%URI{port: port, scheme: scheme}) do
     if is_nil(port) or port == URI.default_port(scheme || "https"), do: "", else: ":#{port}"
