@@ -66,7 +66,7 @@ defmodule Shelly do
 
       client = Shelly.Client.put_auth_key(client, key)
 
-      if Shelly.Client.expired?(client) do
+      if Shelly.Client.token_expired?(client) do
         Shelly.CloudV2.set_switch(client, id, 0, true)
       else
         Shelly.Account.set_switch(client, id, 0, true)

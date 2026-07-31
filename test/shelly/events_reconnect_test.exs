@@ -72,14 +72,15 @@ defmodule Shelly.EventsReconnectTest do
   test "a URL error never reaches the caller with the token in it" do
     # WebSockex.URLError embeds the URL it was handed, and ours carries
     # the access token as a query parameter.
-    # An empty or unparseable server yields WebSockex.URLError, which
-    # embeds the URL — and ours carries the token as a query parameter.
-    for server <- ["wss://", ":::"] do
-      client = Shelly.Client.new(server: server, token: "secret-token")
+    # WebSockex.URLError embeds the URL it was handed, and ours carries the
+    # access token as a query parameter. Shelly.Client.new/1 now rejects a
+    # hostless server, so this is reached by building the struct directly
+    # — which consumers can do, and which is exactly when a guard earns
+    # its keep.
+    client = %Shelly.Client{server: "wss://", token: "secret-token"}
 
-      assert Shelly.Events.start_link(client, handler: fn _ -> :ok end) ==
-               {:error, :invalid_server_url}
-    end
+    assert Shelly.Events.start_link(client, handler: fn _ -> :ok end) ==
+             {:error, :invalid_server_url}
 
     # A client with no token can't open the socket at all.
     keyed = Shelly.Client.new(server: "https://s.shelly.cloud", auth_key: "key")

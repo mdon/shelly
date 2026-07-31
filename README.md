@@ -13,7 +13,7 @@ Pro 3, Gen4 switches — in production.
 ```elixir
 def deps do
   [
-    {:shelly, "~> 0.2"}
+    {:shelly, "~> 0.3.0"}
   ]
 end
 ```
@@ -111,7 +111,7 @@ genuinely need OAuth:
 ```elixir
 client = Shelly.Client.put_auth_key(oauth_client, key)
 
-if Shelly.Client.expired?(client) do
+if Shelly.Client.token_expired?(client) do
   Shelly.CloudV2.set_switch(client, id, 0, true)   # key path, still fine
 else
   Shelly.Account.set_switch(client, id, 0, true)

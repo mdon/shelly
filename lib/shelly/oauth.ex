@@ -3,11 +3,13 @@ defmodule Shelly.OAuth do
   Shelly Cloud OAuth (authorization-code) flow — the "connect your
   account" path that replaces auth keys entirely.
 
-  Note: the flow is Shelly's own non-standard variant — there is no
-  `state` parameter for CSRF binding, and the authorization code is
+  Note: the flow is Shelly's own variant — the authorization code is
   itself a JWT whose (unverified) claims name the account's cloud
-  server. Server claims are pinned to `https://*.shelly.cloud` before
-  use.
+  server, and those claims are pinned to `https://*.shelly.cloud` before
+  use. Shelly's authorization page does accept a `state` parameter and
+  echoes it to your callback; pass one via `authorize_url/2` and compare
+  it before calling `exchange_code/2` — it is the only CSRF binding this
+  flow has.
 
   Flow:
 
@@ -48,11 +50,40 @@ defmodule Shelly.OAuth do
   @login_url "https://my.shelly.cloud/oauth_login.html"
   @fallback_server "https://shelly-1-eu.shelly.cloud"
 
-  @doc "URL to open (usually in a popup) to start the grant."
-  @spec authorize_url(String.t(), String.t()) :: String.t()
-  def authorize_url(redirect_uri, client_id \\ @default_client_id) do
-    @login_url <> "?" <> URI.encode_query(client_id: client_id, redirect_uri: redirect_uri)
+  @doc """
+  URL to open (usually in a popup) to start the grant.
+
+  Options:
+
+    * `:state` — an opaque value Shelly echoes back to your callback.
+      This library only passes it through: generate one per attempt
+      (`Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)`),
+      keep it in the user's session, and **compare it before calling
+      `exchange_code/2`**. Without that comparison an attacker can feed
+      your callback a code from a different account.
+    * `:client_id` — defaults to `"shelly-diy"`.
+  """
+  @spec authorize_url(String.t(), keyword()) :: String.t()
+  def authorize_url(redirect_uri, opts \\ [])
+
+  def authorize_url(redirect_uri, opts) when is_list(opts) do
+    query = [
+      client_id: Keyword.get(opts, :client_id, @default_client_id),
+      redirect_uri: redirect_uri
+    ]
+
+    query =
+      case Keyword.get(opts, :state) do
+        state when is_binary(state) and state != "" -> query ++ [state: state]
+        _ -> query
+      end
+
+    @login_url <> "?" <> URI.encode_query(query)
   end
+
+  # Kept for the 0.2.x positional form, which passed a client id.
+  def authorize_url(redirect_uri, client_id) when is_binary(client_id),
+    do: authorize_url(redirect_uri, client_id: client_id)
 
   @doc """
   Exchange an authorization code for an access token.
@@ -135,8 +166,10 @@ defmodule Shelly.OAuth do
           new_token when is_binary(new_token) ->
             {:ok, token_result(new_token, body, server, client)}
 
+          # The server answered without refusing — reporting that as
+          # "unsupported" sends the caller to re-authorize a live grant.
           nil ->
-            {:error, :refresh_unsupported}
+            {:error, :no_token_in_response}
         end
 
       # 429 and 408 mean "later", not "never" — reporting them as
@@ -212,14 +245,19 @@ defmodule Shelly.OAuth do
 
   def peek_jwt(_), do: nil
 
-  defp extract_refresh_token(%{"refresh_token" => t}) when is_binary(t), do: t
-  defp extract_refresh_token(%{"data" => %{"refresh_token" => t}}) when is_binary(t), do: t
+  defp extract_refresh_token(%{"refresh_token" => t}), do: present(t)
+  defp extract_refresh_token(%{"data" => %{"refresh_token" => t}}), do: present(t)
   defp extract_refresh_token(_), do: nil
 
-  defp extract_token(%{"access_token" => t}) when is_binary(t), do: t
-  defp extract_token(%{"data" => %{"code" => t}}) when is_binary(t), do: t
-  defp extract_token(%{"data" => %{"access_token" => t}}) when is_binary(t), do: t
+  # An empty string is a binary, and used to sail through as a token —
+  # producing a client that reports itself authorized and 401s forever.
+  defp extract_token(%{"access_token" => t}), do: present(t)
+  defp extract_token(%{"data" => %{"code" => t}}), do: present(t)
+  defp extract_token(%{"data" => %{"access_token" => t}}), do: present(t)
   defp extract_token(_), do: nil
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_value), do: nil
 
   defp server_from_jwt(code) do
     case peek_jwt(code) do
@@ -240,7 +278,8 @@ defmodule Shelly.OAuth do
     host = if is_binary(uri.host), do: String.downcase(uri.host)
 
     if is_binary(host) and String.ends_with?(host, ".shelly.cloud") do
-      "https://" <> host
+      # Keep a non-default port, the same rule Shelly.Client applies.
+      "https://" <> host <> port_suffix(uri)
     else
       Logger.debug(fn -> "Shelly.OAuth: server claim #{inspect(url)} is not a Shelly host" end)
       @fallback_server
@@ -248,4 +287,8 @@ defmodule Shelly.OAuth do
   end
 
   defp normalize_url(_url), do: @fallback_server
+
+  defp port_suffix(%URI{port: port, scheme: scheme}) do
+    if is_nil(port) or port == URI.default_port(scheme || "https"), do: "", else: ":#{port}"
+  end
 end

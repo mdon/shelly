@@ -21,12 +21,16 @@ dialyzer, not from six models reading the source.
 
 ## Testing without external deps
 
-No Mox, no bypass. HTTP is stubbed through Req's `:plug` option, reached
-via `:req_options` on the account/conn map:
+No Mox, no bypass. HTTP is stubbed through Req's `:plug` option, carried
+on the client:
 
 ```elixir
-account = %{server: "https://x.shelly.cloud", token: "tok",
-            req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 200, body) end]}
+client =
+  Shelly.Client.new(
+    server: "https://x.shelly.cloud",
+    token: "tok",
+    req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 200, body) end]
+  )
 ```
 
 `config :shelly, :req_options` is the global fallback (use `async: false`
@@ -56,6 +60,12 @@ Each of these cost a live incident. Don't undo them without evidence.
   Pass `:rate_key` so one account is one budget.
 - **The access token rides the websocket URL**, so nothing may log a raw
   URL or an unsanitized WebSockex error.
+- **Confirm success positively.** Shelly returns HTTP 200 for refused
+  commands; require `"isok" => true` rather than treating "not an
+  explicit no" as yes.
+- **Guard both call sites.** Three of the defects found in review were
+  the *same* bug surviving at a second call site after the first was
+  fixed. When you fix a shape assumption, grep for its siblings.
 
 ## Releasing
 

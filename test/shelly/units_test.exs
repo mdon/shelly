@@ -45,6 +45,8 @@ defmodule Shelly.UnitsTest do
     end
 
     test "the integer and string forms of one id agree" do
+      # Outside the 6-or-12-digit decimal window, which no rule can settle
+      # without knowing the device list — see normalize_device_id/2.
       for id <- [0xB923FA, 0x485519999340, 0x0CDC7EF76644] do
         from_integer = Shelly.Events.normalize_device_id(id)
         from_decimal_string = Shelly.Events.normalize_device_id(Integer.to_string(id))
@@ -52,8 +54,24 @@ defmodule Shelly.UnitsTest do
       end
     end
 
-    test "a 6-character all-digit string is a Gen1 hex id, not decimal" do
+    test "a 6-character all-digit string is read as a Gen1 hex id" do
       assert Shelly.Events.normalize_device_id("123456") == "123456"
+    end
+
+    test "the ambiguous window is resolved by a known-id lookup" do
+      # "405408" is both a valid Gen1 hex id and the decimal rendering of
+      # 0x062fa0. Length cannot decide; the caller's device list can.
+      assert Shelly.Events.normalize_device_id("405408") == "405408"
+      assert Shelly.Events.normalize_device_id("405408", ["062fa0"]) == "062fa0"
+      assert Shelly.Events.normalize_device_id("405408", ["405408"]) == "405408"
+
+      # Neither known, or both: fall back to the hex reading.
+      assert Shelly.Events.normalize_device_id("405408", ["aabbcc"]) == "405408"
+      assert Shelly.Events.normalize_device_id("405408", ["405408", "062fa0"]) == "405408"
+
+      # Unambiguous ids are unaffected by the lookup.
+      assert Shelly.Events.normalize_device_id("79530338915136", ["485519999340"]) ==
+               "485519999340"
     end
 
     test "non-hex ids (BLE/Z-Wave X-prefixed) pass through downcased" do
@@ -94,13 +112,13 @@ defmodule Shelly.UnitsTest do
       dead = %{live | expires_at: DateTime.add(DateTime.utc_now(), -60)}
       keyless = Shelly.Client.new(server: "https://s.shelly.cloud", auth_key: "key")
 
-      refute Shelly.Client.expired?(live)
-      assert Shelly.Client.expired?(dead)
+      refute Shelly.Client.token_expired?(live)
+      assert Shelly.Client.token_expired?(dead)
       # No token at all counts as expired, and no expiry recorded counts
       # as live — the cloud is the real authority.
-      assert Shelly.Client.expired?(keyless)
+      assert Shelly.Client.token_expired?(keyless)
 
-      refute Shelly.Client.expired?(
+      refute Shelly.Client.token_expired?(
                Shelly.Client.new(server: "https://s.shelly.cloud", token: "t")
              )
 
@@ -125,6 +143,24 @@ defmodule Shelly.UnitsTest do
                "https://shelly-74-eu.shelly.cloud"
 
       assert_raise ArgumentError, fn -> Shelly.Client.new(token: "tok") end
+    end
+
+    test "a hostless server is rejected at construction" do
+      # These used to build %Client{server: "https://"} and fail later,
+      # somewhere far less obvious.
+      for bad <- ["", "wss://", ":::", "https://"] do
+        assert_raise ArgumentError, fn -> Shelly.Client.new(server: bad) end
+      end
+    end
+
+    test "an http:// server is upgraded without inheriting port 80" do
+      # URI.parse fills the port in from the SOURCE scheme, and carrying
+      # that onto the https URL sent every request to :80.
+      assert Shelly.Client.new(server: "http://s.shelly.cloud").server ==
+               "https://s.shelly.cloud"
+
+      assert Shelly.Client.new(server: "http://s.shelly.cloud:8080").server ==
+               "https://s.shelly.cloud:8080"
     end
 
     test "a non-default port survives normalization" do

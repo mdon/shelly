@@ -111,13 +111,24 @@ defmodule Shelly.OAuthTest do
       assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
     end
 
-    test "a 200 that carries no token is not mistaken for success" do
+    test "a 200 that carries no token is reported as such, not as a refusal" do
+      # :refresh_unsupported means "re-authorize the user". A server that
+      # answered without refusing hasn't earned that.
       stub(fn conn -> respond(conn, 200, %{"isok" => true}) end)
 
       account =
         Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
 
-      assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
+      assert Shelly.OAuth.refresh(account) == {:error, :no_token_in_response}
+    end
+
+    test "an empty access token is not a token" do
+      stub(fn conn -> respond(conn, 200, %{"access_token" => ""}) end)
+
+      account =
+        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
+
+      assert Shelly.OAuth.refresh(account) == {:error, :no_token_in_response}
     end
 
     test "server errors surface as-is so callers can retry" do

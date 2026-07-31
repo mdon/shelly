@@ -22,8 +22,18 @@ defmodule Shelly.CloudV1 do
   @spec get_status(Shelly.Client.t(), String.t()) :: {:ok, {map(), boolean()}} | {:error, term()}
   def get_status(conn, device_id) do
     case post(conn, "/device/status", id: device_id) do
-      {:ok, %{status: 200, body: %{"isok" => true, "data" => data}}} when is_map(data) ->
-        {:ok, {data["device_status"] || data, data["online"] == true}}
+      {:ok,
+       %{
+         status: 200,
+         body: %{"isok" => true, "data" => %{"device_status" => device_status} = data}
+       }}
+      when is_map(device_status) ->
+        {:ok, {device_status, data["online"] == true}}
+
+      # Falling back to the wrapper here handed callers a map that parses
+      # as "unknown" and `on: false` — a device that looks permanently off.
+      {:ok, %{status: 200, body: %{"isok" => true}}} ->
+        {:error, :no_device_status}
 
       other ->
         error(other)
@@ -41,6 +51,8 @@ defmodule Shelly.CloudV1 do
       other -> error(other)
     end
   end
+
+  defp post(%Shelly.Client{auth_key: nil}, _path, _form), do: {:error, :no_auth_key}
 
   defp post(conn, path, form) do
     Shelly.RateGate.run(Shelly.Client.rate_key(conn), fn ->

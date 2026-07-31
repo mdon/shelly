@@ -1,6 +1,8 @@
 defmodule Shelly.HTTP do
   @moduledoc false
 
+  require Logger
+
   # One place where request options are assembled, so every client —
   # not just OAuth — can be pointed somewhere else.
   #
@@ -25,8 +27,17 @@ defmodule Shelly.HTTP do
 
   defp global_options do
     case Application.get_env(:shelly, :req_options, []) do
-      options when is_list(options) -> options
-      _invalid -> []
+      options when is_list(options) ->
+        options
+
+      invalid ->
+        # Silently ignoring this makes a misconfigured proxy or timeout
+        # look accepted.
+        Logger.warning(
+          "Shelly: config :shelly, :req_options must be a keyword list, got: #{inspect(invalid)}"
+        )
+
+        []
     end
   end
 end

@@ -31,7 +31,7 @@ client = Shelly.Client.put_rate_key(client, account.id)
 - `Shelly.Events.start_link/2` takes a client rather than loose
   `:server`/`:token` options, and returns `{:error, :no_token}` for a
   key-only client instead of opening a socket that can't authenticate.
-- New: `Shelly.Client.expired?/1`, `expires_in/1`, `oauth?/1`, `keyed?/1`,
+- New: `Shelly.Client.token_expired?/1`, `expires_in/1`, `oauth?/1`, `keyed?/1`,
   `put_auth_key/2`, `put_rate_key/2`, `put_req_options/2`. Servers are
   normalized to `https://host[:port]` — the port is preserved, which an
   earlier draft of this dropped, silently sending anything on a custom
@@ -39,11 +39,62 @@ client = Shelly.Client.put_rate_key(client, account.id)
 
 ### Fixed
 
-- `Shelly.CloudV2` reported a **rejected control command as success**.
-  Shelly answers a refused switch with HTTP 200 and `"isok": false`, and
-  only the status code was being checked, so `set_switch/5`,
-  `set_cover/5` and `set_light/4` returned `:ok` for commands the cloud
-  declined. Found by the first HTTP-level test of that module.
+Six of these come from a second quorum review, and three of them are the
+*same defect surviving at a second call site* after the first was fixed —
+which is now a standing note in `AGENTS.md`.
+
+- **A control command is confirmed positively.** `Shelly.CloudV2` reported
+  a rejected command as success: Shelly answers a refused switch with HTTP
+  200 and `"isok": false`, and only the status code was checked. The first
+  fix looked for an explicit `false`, which still accepted a proxy's HTML
+  error page or an empty body as a switched relay; `"isok": true` is now
+  required, matching `Account` and `CloudV1`.
+- **A scalar `"device"` no longer kills the socket on the `Online` path.**
+  `online_flag/1` carried the same unguarded `get_in/2` that
+  `raw_device_id/1` was hardened against in 0.2.1, and it runs outside the
+  handler's rescue — so one malformed event ended realtime for that
+  account.
+- **Alarm and presence deltas report unknown, not clear.** A `smoke:0`
+  delta without its `alarm` key was reported as *not alarming*. This is
+  the same unknown-vs-off fix 0.2.1 made for switches, on the classes
+  where the wrong direction is a safety issue.
+- **`http://` servers no longer become `https://host:80`.** `URI.parse/1`
+  fills the port in from the source scheme, and the 0.3.0 port-preserving
+  fix carried it onto the upgraded URL — every request then went to :80.
+- **An empty string is no longer a credential.** `""` passed
+  `is_binary/1`, so a token-less grant produced a client that reported
+  itself authorized and 401'd forever.
+- **A refresh answering 200 without a token** reports
+  `:no_token_in_response` rather than `:refresh_unsupported`, which had
+  been sending callers to re-authorize a grant the server never refused.
+- Missing credentials return `{:error, :no_token}` / `{:error,
+  :no_auth_key}` instead of raising from string concatenation, and
+  malformed payloads (a list where a device map was promised, a v1
+  response with no `device_status`, a `devices_status` that isn't a map)
+  are errors rather than plausible-looking empty results.
+- `Shelly.RateGate` rejects a zero or negative `:interval_ms` instead of
+  silently disabling pacing, and an invalid global `:req_options` is
+  logged rather than discarded.
+
+### Changed
+
+- **Component precedence is now explicit**: actuators, then meters, then
+  sensors. Previously `parse/4` and `component_of/2` enumerated device
+  classes separately and disagreed for payloads naming several components
+  on one channel (no known device emits these). A differential over the
+  pre-refactor parser confirms every other resolution is unchanged.
+- `Shelly.Client`'s expiry predicate is now **`token_expired?/1`**. The semantics
+  are deliberate — a key-only client answers `true` and is nonetheless
+  fully functional, which is what makes `if token_expired?, do: CloudV2,
+  else: Account` correct — but the old name asserted something about the
+  client that was only true of its token.
+- `Shelly.OAuth.authorize_url/2` takes options and supports **`:state`**,
+  the CSRF binding for the callback. The moduledoc previously claimed
+  Shelly had no such parameter; it does, and this library was talking
+  users out of the only protection the flow offers.
+- `Shelly.Events.normalize_device_id/2` resolves the ambiguous ids that
+  length alone cannot (~5% of Gen1 ids) against a set of ids you already
+  know.
 
 ## v0.2.1
 
@@ -61,7 +112,9 @@ wrong answer instead of an error.
   every Gen1 event was dropped — the exact failure this release exists to fix.
   Conversion is now driven by the documented widths, and integer and string
   forms of one id resolve to the same key (they previously differed by
-  padding: `"000000b923fa"` vs `"b923fa"`).
+  padding: `"000000b923fa"` vs `"b923fa"`) — **except** where a decimal
+  rendering is itself exactly 6 or 12 digits, which no rule can settle;
+  0.3.0 adds `normalize_device_id/2` for that case.
 
 ### Fixed — protocol contracts
 
@@ -81,7 +134,9 @@ wrong answer instead of an error.
   websocket delta like `%{"switch:0" => %{"apower" => 15.0}}` passes both
   guards but says nothing about the relay; `:on` is now `nil` (unknown)
   instead of a confident `false`. On price-driven heating, a false OFF is
-  the expensive direction.
+  the expensive direction. (Applied to switches, lights, covers and Gen1
+  relays here; the alarm and presence classes were missed and are fixed
+  in 0.3.0.)
 - **Gen1 3EM: phases 1 and 2 parsed as an unmetered relay at 0 W.** Gen1
   arrays were dispatched on existence rather than on holding the requested
   channel, so a device with one relay and three emeters answered "relay" for
@@ -120,7 +175,9 @@ wrong answer instead of an error.
 - An `Online` event with no readable flag is no longer reported as offline —
   a missing field is not evidence that a device is down.
 - A scalar `"device"` value in an event used to raise inside `get_in/2`,
-  outside the handler's rescue, killing the socket process.
+  outside the handler's rescue, killing the socket process. (Fixed for
+  `StatusOnChange` here; the same call in the `Online` path was missed and
+  is fixed in 0.3.0.)
 - Every dropped event now logs at debug with the id and the message keys.
   Silence in those branches is what let the decimal-id bug hide.
 

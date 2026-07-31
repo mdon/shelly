@@ -19,8 +19,17 @@ defmodule Shelly.Client do
       client = Shelly.OAuth.exchange_code(code) |> then(fn {:ok, c} -> c end)
       client = Shelly.Client.put_auth_key(client, "MWFmZTNm…")
 
-      Shelly.Client.expired?(client)
+      Shelly.Client.token_expired?(client)
       #=> false
+
+  ## One server per client
+
+  Both credentials address the same `:server`. Shelly issues an auth key
+  together with its own server URI, and an OAuth token names its server
+  in the JWT — for one account those are the same host, which is why this
+  struct holds one. If you ever meet an account whose key and token live
+  on different endpoints, build two clients rather than expecting
+  `put_auth_key/2` to carry a second address.
 
   ## Rate limiting
 
@@ -104,23 +113,31 @@ defmodule Shelly.Client do
 
   @doc "Can this client use the OAuth paths (account API, websocket)?"
   @spec oauth?(t()) :: boolean()
-  def oauth?(%__MODULE__{token: token}), do: is_binary(token)
+  def oauth?(%__MODULE__{token: token}), do: is_binary(token) and token != ""
 
   @doc "Can this client use the auth-key paths (v2/v1)?"
   @spec keyed?(t()) :: boolean()
-  def keyed?(%__MODULE__{auth_key: auth_key}), do: is_binary(auth_key)
+  def keyed?(%__MODULE__{auth_key: auth_key}), do: is_binary(auth_key) and auth_key != ""
 
   @doc """
-  Has the access token passed its expiry?
+  Is this client's OAuth token unusable — absent or past its expiry?
 
-  A client with no token is expired by definition; one whose expiry was
-  never recorded is assumed live, since the cloud is the real authority.
+  Named for the token rather than the client because a key-only client
+  answers `true` here and is nonetheless fully functional: that is the
+  point. `if token_expired?(client), do: CloudV2, else: Account` routes
+  both a lapsed token and a key-only client to the path that works.
+
+  A client whose expiry was never recorded is assumed live, since the
+  cloud is the real authority. Note the trap: a token whose JWT cannot be
+  parsed leaves `:expires_at` `nil`, so this answers `false` forever — a
+  renewal loop driven only off this will never fire. Record the expiry
+  when you store the token.
   """
-  @spec expired?(t()) :: boolean()
-  def expired?(%__MODULE__{token: nil}), do: true
-  def expired?(%__MODULE__{expires_at: nil}), do: false
+  @spec token_expired?(t()) :: boolean()
+  def token_expired?(%__MODULE__{token: token}) when token in [nil, ""], do: true
+  def token_expired?(%__MODULE__{expires_at: nil}), do: false
 
-  def expired?(%__MODULE__{expires_at: expires_at}),
+  def token_expired?(%__MODULE__{expires_at: expires_at}),
     do: DateTime.compare(expires_at, DateTime.utc_now()) != :gt
 
   @doc "Seconds until the token expires (negative once it has), or `nil`."
@@ -145,8 +162,11 @@ defmodule Shelly.Client do
     uri = URI.parse(if String.contains?(server, "://"), do: server, else: "https://" <> server)
 
     case uri.host do
-      nil -> server
-      host -> "https://" <> String.downcase(host) <> port_suffix(uri)
+      host when is_binary(host) and host != "" ->
+        "https://" <> String.downcase(host) <> port_suffix(uri)
+
+      _ ->
+        raise ArgumentError, "Shelly.Client could not read a host from server: #{inspect(server)}"
     end
   end
 
@@ -154,6 +174,10 @@ defmodule Shelly.Client do
     raise ArgumentError, "Shelly.Client needs a :server URL, got: #{inspect(server)}"
   end
 
-  defp port_suffix(%URI{port: port}) when port in [nil, 443], do: ""
-  defp port_suffix(%URI{port: port}), do: ":#{port}"
+  # Keep a genuinely custom port, but drop the one URI.parse/1 filled in
+  # from the *source* scheme: "http://host" arrives with port 80, and
+  # carrying that onto an https URL sends every request to :80.
+  defp port_suffix(%URI{port: port, scheme: scheme}) do
+    if is_nil(port) or port == URI.default_port(scheme || "https"), do: "", else: ":#{port}"
+  end
 end

@@ -93,17 +93,19 @@ defmodule Shelly.CloudV2 do
     |> command_result()
   end
 
-  # A rejected command comes back as HTTP 200 with "isok": false. Reading
-  # only the status code reported a switch that never moved as switched —
-  # which on a control API is the worst possible direction to be wrong.
-  defp command_result({:ok, %{status: 200, body: %{"isok" => false}} = response}),
-    do: error({:ok, response})
-
-  defp command_result({:ok, %{status: 200}}), do: :ok
+  # A rejected command comes back as HTTP 200 with "isok": false, so the
+  # status code alone reported a switch that never moved as switched.
+  # Confirmation must be positive: a proxy's HTML error page, or any body
+  # that isn't Shelly saying yes, is a failure — on a control API, that is
+  # the direction to be wrong in.
+  defp command_result({:ok, %{status: 200, body: %{"isok" => true}}}), do: :ok
+  defp command_result({:ok, %{status: 200} = response}), do: error({:ok, response})
   defp command_result(other), do: error(other)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp post_json(%Shelly.Client{auth_key: nil}, _path, _body), do: {:error, :no_auth_key}
 
   defp post_json(conn, path, body) do
     Shelly.RateGate.run(Shelly.Client.rate_key(conn), fn ->

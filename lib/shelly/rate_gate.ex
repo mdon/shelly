@@ -59,7 +59,18 @@ defmodule Shelly.RateGate do
 
   @impl true
   def init(opts) do
-    {:ok, %{interval: Keyword.get(opts, :interval_ms, @default_interval_ms), slots: %{}}}
+    interval =
+      case Keyword.get(opts, :interval_ms, @default_interval_ms) do
+        ms when is_integer(ms) and ms > 0 ->
+          ms
+
+        invalid ->
+          raise ArgumentError,
+                "Shelly.RateGate :interval_ms must be a positive integer, got: " <>
+                  "#{inspect(invalid)}. Zero or negative disables pacing, which is how you get 429s."
+      end
+
+    {:ok, %{interval: interval, slots: %{}}}
   end
 
   @impl true

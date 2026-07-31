@@ -20,7 +20,8 @@ defmodule Shelly.Account do
   @spec list_devices(Shelly.Client.t()) :: {:ok, map()} | {:error, term()}
   def list_devices(%Shelly.Client{} = client) do
     case post(client, "/interface/device/get_all_lists", []) do
-      {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices" => devices}}}} ->
+      {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices" => devices}}}}
+      when is_map(devices) ->
         {:ok, devices}
 
       other ->
@@ -78,7 +79,8 @@ defmodule Shelly.Account do
           {:ok, %{optional(String.t()) => map()}} | {:error, term()}
   def all_statuses(%Shelly.Client{} = client) do
     case post(client, "/device/all_status", show_info: true) do
-      {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices_status" => statuses}}}} ->
+      {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices_status" => statuses}}}}
+      when is_map(statuses) ->
         {:ok, Map.new(statuses, fn {key, st} -> {status_key(key, st), st} end)}
 
       other ->
@@ -89,7 +91,9 @@ defmodule Shelly.Account do
   defp status_key(outer_key, status) do
     id =
       case status do
-        %{"_dev_info" => %{"id" => id}} when is_binary(id) -> id
+        # An empty id is not an id — fall back rather than collapsing
+        # every such entry under "".
+        %{"_dev_info" => %{"id" => id}} when is_binary(id) and id != "" -> id
         _ -> outer_key
       end
 
@@ -109,8 +113,10 @@ defmodule Shelly.Account do
   end
 
   @doc """
-  Parse one device's `all_statuses/1` entry for a channel — derives
-  online from the payload's cloud connectivity instead of assuming it:
+  Parse one device's `all_statuses/1` entry for a channel. Online state
+  comes from `_dev_info.online`, the cloud's own view, which every device
+  carries — unlike `cloud.connected`, which only mains-powered Gen2+
+  hardware reports:
 
       {:ok, statuses} = Shelly.Account.all_statuses(account)
       Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
@@ -127,6 +133,8 @@ defmodule Shelly.Account do
   defp online?(%{"_dev_info" => %{"online" => online}}) when is_boolean(online), do: online
   defp online?(%{"_dev_info" => %{"online" => online}}), do: online in [1, "true"]
   defp online?(status), do: get_in(status, ["cloud", "connected"]) == true
+
+  defp post(%Shelly.Client{token: nil}, _path, _form), do: {:error, :no_token}
 
   defp post(%Shelly.Client{} = client, path, form) do
     case Shelly.RateGate.run(Shelly.Client.rate_key(client), fn ->

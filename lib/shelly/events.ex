@@ -170,14 +170,23 @@ defmodule Shelly.Events do
   # An Online event with no readable flag used to be reported as
   # offline — a missing field is not evidence that a device is down.
   defp online_flag(message) do
+    # `get_in(message, ["device", ...])` raises when "device" is a scalar,
+    # and this runs outside safe_call's rescue — it would take the socket
+    # down. raw_device_id/1 was hardened for the same payload; this call
+    # site was missed.
+    nested = nested_online(message["device"])
+
     cond do
       message["online"] in [1, true] -> true
       message["online"] in [0, false] -> false
-      get_in(message, ["device", "online"]) in [1, true] -> true
-      get_in(message, ["device", "online"]) in [0, false] -> false
+      nested in [1, true] -> true
+      nested in [0, false] -> false
       true -> nil
     end
   end
+
+  defp nested_online(%{"online" => online}), do: online
+  defp nested_online(_device), do: nil
 
   # Anything unhandled leaves a trace. Silence here is what let a
   # mis-shaped device id disable realtime without a single log line.
@@ -234,6 +243,21 @@ defmodule Shelly.Events do
   carrying the integer and one carrying the string resolve to one key.
   Ids that aren't hex at all (the `X`-prefixed BLE/Z-Wave form) are
   downcased and returned as-is.
+
+  ## The one case length cannot settle
+
+  A decimal rendering that happens to be exactly 6 or 12 digits is
+  indistinguishable from a hex id, because such a string is both. This
+  reaches roughly 5% of Gen1 ids — those whose hex form has a leading
+  zero, e.g. `0x062fa0`, which renders as `"405408"`. Gen2+ ids are
+  unaffected: no Shelly OUI produces a 12-digit decimal.
+
+  When you have the device list — and a consumer matching events against
+  its own devices always does — pass it and the ambiguity resolves by
+  lookup:
+
+      Shelly.Events.normalize_device_id("405408", known_ids)
+      #=> "062fa0"   (when "062fa0" is in known_ids and "405408" is not)
   """
   @hex_id_widths [6, 12]
 
@@ -258,6 +282,46 @@ defmodule Shelly.Events do
   end
 
   def normalize_device_id(_), do: nil
+
+  @doc """
+  Normalize against a set of ids you already know.
+
+  Resolves the one case `normalize_device_id/1` cannot: when a digits-only
+  string is both a valid hex id and a valid decimal rendering, the
+  interpretation present in `known_ids` wins. Falls back to
+  `normalize_device_id/1` when neither or both are known.
+  """
+  @spec normalize_device_id(String.t() | integer() | term(), Enumerable.t()) :: String.t() | nil
+  def normalize_device_id(id, known_ids) do
+    known = MapSet.new(known_ids, &String.downcase/1)
+
+    case candidates(id) do
+      [primary] ->
+        primary
+
+      [primary, alternate] ->
+        cond do
+          MapSet.member?(known, primary) -> primary
+          MapSet.member?(known, alternate) -> alternate
+          true -> primary
+        end
+    end
+  end
+
+  # Both readings of an ambiguous id, likeliest first; one reading
+  # otherwise.
+  defp candidates(id) when is_binary(id) do
+    trimmed = String.trim(id)
+    primary = normalize_device_id(trimmed)
+
+    if String.match?(trimmed, ~r/^\d+$/) and String.length(trimmed) in @hex_id_widths do
+      [primary, trimmed |> String.to_integer() |> normalize_device_id()]
+    else
+      [primary]
+    end
+  end
+
+  defp candidates(id), do: [normalize_device_id(id)]
 
   # All digits, but not a length a hex id is allowed to have.
   defp decimal_form?(id) do

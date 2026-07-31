@@ -151,7 +151,12 @@ defmodule Shelly.ClientsEdgeTest do
           server: "https://127.0.0.1:1",
           auth_key: "key",
           rate_key: :edge,
-          req_options: [retry: false, connect_options: [timeout: 200]]
+          # verify_none: this asserts our error handling, not whether the
+          # machine running the suite has a CA trust store.
+          req_options: [
+            retry: false,
+            connect_options: [timeout: 200, transport_opts: [verify: :verify_none]]
+          ]
         )
 
       assert {:error, %Req.TransportError{}} = Shelly.CloudV1.get_status(conn, "b923fa")

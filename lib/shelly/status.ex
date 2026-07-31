@@ -20,13 +20,32 @@ defmodule Shelly.Status do
   `has_component?/2` guards partial payloads: websocket events may
   carry only the piece that changed (`sys`, an input), and parsing
   those as a full status would wrongly report the device off.
+
+  ## Known limitations on two Gen1 devices
+
+    * **Shelly 2.5 in roller mode** reports `relays` *and* `rollers`, and
+      relays win — so an open blind reads as a closed relay. The device
+      gives no in-payload signal of its mode, and reordering would break
+      the far more common relay mode, which also carries a `rollers`
+      array. Pass `extra: %{component: "cover"}` when you know the mode.
+    * **Pro 3EM channel 0** resolves to `em1:0` (phase A) rather than the
+      `em:0` three-phase aggregate, since a per-channel component is the
+      more useful answer for a caller asking about channel 0. Read
+      `status["em:0"]` directly for the total.
   """
 
   @typedoc """
-  A parsed status. Deliberately a plain map, not a struct: transports
-  differ in what they can report, and callers pattern-match the keys they
-  need. `:on` is `nil` when the payload named the component but carried
-  no state for it (a partial websocket delta) — unknown, not off.
+  A parsed status.
+
+  Every parse emits all of these keys, so pattern-matching is safe. It is
+  deliberately a plain map rather than a struct because `parse/4` merges a
+  caller-supplied `extra` map into the result — a documented extension
+  point for transport-level fields the parser doesn't know about. Merging
+  arbitrary keys into a struct produces a malformed struct instead of an
+  error, which would turn that extension point into silent corruption.
+
+  `:on` is `nil` when the payload named the component but carried no
+  state for it (a partial websocket delta) — unknown, not off.
   """
   @type t :: %{
           on: boolean() | nil,
@@ -99,18 +118,36 @@ defmodule Shelly.Status do
   # other two applied. All three now derive from `component_tag/2`, so a
   # new device class is added in exactly one place.
 
+  # Resolution order, most actionable first: **actuators** (things you can
+  # switch), then **meters** (things that measure), then **sensors**
+  # (things that report a condition). A payload naming several components
+  # for one channel answers with the one a caller can act on.
+  #
+  # Two forms can't be expressed as "prefix:channel" — the light family
+  # spans four keys, the three-phase aggregate exists only on channel 0 —
+  # so they are interleaved explicitly at their place in the order rather
+  # than being demoted to the end by accident.
+
   # {payload key prefix, tag, reported component}
-  @rpc_components [
+  @actuator_components [
     {"switch", :switch, "switch"},
     {"cover", :cover, "cover"},
-    {"light", :light, "light"},
+    {"light", :light, "light"}
+  ]
+
+  @meter_components [
     {"pm1", :pm1, "pm"},
-    {"em1", :em1, "em"},
+    {"em1", :em1, "em"}
+  ]
+
+  @sensor_components [
     {"flood", :flood, "flood"},
     {"smoke", :smoke, "smoke"},
     {"presence", :presence, "presence"},
     {"voltmeter", :voltmeter, "sensor"}
   ]
+
+  @rpc_components @actuator_components ++ @meter_components ++ @sensor_components
 
   # {payload key, tag, reported component} — Gen1 arrays, indexed by channel
   @gen1_arrays [
@@ -125,20 +162,31 @@ defmodule Shelly.Status do
   end
 
   defp rpc_tag(status, channel) do
-    Enum.find_value(@rpc_components, fn {prefix, tag, _component} ->
-      if is_map(status["#{prefix}:#{channel}"]), do: tag
-    end) || rpc_special_tag(status, channel)
+    actuator_tag(status, channel) ||
+      meter_tag(status, channel) ||
+      sensor_tag(status, channel)
   end
 
-  defp rpc_special_tag(status, channel) do
-    cond do
-      # Three-phase aggregate only exists on channel 0.
-      channel == 0 and is_map(status["em:0"]) -> :em
-      light_family_key(status, channel) -> :light_family
-      is_map(status["temperature:#{channel}"]) -> :rpc_sensor
-      is_map(status["humidity:#{channel}"]) -> :rpc_sensor
-      true -> nil
-    end
+  defp actuator_tag(status, channel) do
+    prefix_tag(@actuator_components, status, channel) ||
+      if light_family_key(status, channel), do: :light_family
+  end
+
+  defp meter_tag(status, channel) do
+    prefix_tag(@meter_components, status, channel) ||
+      if channel == 0 and is_map(status["em:0"]), do: :em
+  end
+
+  defp sensor_tag(status, channel) do
+    prefix_tag(@sensor_components, status, channel) ||
+      if is_map(status["temperature:#{channel}"]) or is_map(status["humidity:#{channel}"]),
+        do: :rpc_sensor
+  end
+
+  defp prefix_tag(components, status, channel) do
+    Enum.find_value(components, fn {prefix, tag, _component} ->
+      if is_map(status["#{prefix}:#{channel}"]), do: tag
+    end)
   end
 
   defp gen1_tag(status, channel) do
@@ -502,15 +550,22 @@ defmodule Shelly.Status do
   defp parse_alarm(status, kind, channel, online) do
     sensor = status["#{kind}:#{channel}"]
 
+    # A delta naming the component without its alarm key says nothing
+    # about the alarm. Reporting `false` there tells a consumer the smoke
+    # detector stopped — see output_state/1.
     rpc_common(status, online, channel)
-    |> Map.merge(%{on: sensor["alarm"] == true, component: kind})
+    |> Map.merge(%{on: output_state(sensor["alarm"]), component: kind})
   end
 
   defp parse_presence(status, channel, online) do
     presence = status["presence:#{channel}"]
 
     detected =
-      presence["num_objects"] |> numeric() |> Kernel.||(0) > 0 or presence["presence"] == true
+      case {numeric(presence["num_objects"]), presence["presence"]} do
+        {count, _} when is_number(count) -> count > 0
+        {_, flag} when is_boolean(flag) -> flag
+        _ -> nil
+      end
 
     rpc_common(status, online, channel)
     |> Map.merge(%{on: detected, component: "presence"})
