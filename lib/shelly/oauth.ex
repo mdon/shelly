@@ -44,21 +44,6 @@ defmodule Shelly.OAuth do
 
   require Logger
 
-  @typedoc """
-  The result of an authorization-code exchange or a refresh.
-
-  `:expires_at` comes from the token's own `exp` claim — access tokens
-  last 12 hours — and `:refresh_token` is whatever the server returned,
-  which today is usually `nil`. Persist both.
-  """
-  @type grant :: %{
-          access_token: String.t(),
-          refresh_token: String.t() | nil,
-          expires_at: DateTime.t() | nil,
-          user_api_url: String.t(),
-          label: String.t()
-        }
-
   @default_client_id "shelly-diy"
   @login_url "https://my.shelly.cloud/oauth_login.html"
   @fallback_server "https://shelly-1-eu.shelly.cloud"
@@ -72,17 +57,15 @@ defmodule Shelly.OAuth do
   @doc """
   Exchange an authorization code for an access token.
 
-  Returns `{:ok, %{access_token: token, refresh_token: refresh, expires_at:
-  datetime, user_api_url: url, label: label}}` — `user_api_url` is the
-  account's home cloud server (read from the token's JWT claims),
-  `label` a best-effort account identifier.
+  Returns `{:ok, %Shelly.Client{}}` — ready to pass to `Shelly.Account`,
+  `Shelly.Events` and `refresh/2`. The client's `:server` comes from the
+  token's own JWT claims (the account's home cloud server), and `:label`
+  is a best-effort account identifier.
 
-  `:expires_at` is a `DateTime` derived from the token's `exp` claim
-  (`nil` if the token carries no expiry); `:refresh_token` is whatever
-  the server returned under `refresh_token`, or `nil`. **Persist both** —
-  a token that looks permanent stops working 12 hours in.
+  **Persist `:expires_at` and `:refresh_token`** — an access token that
+  looks permanent stops working 12 hours in.
   """
-  @spec exchange_code(String.t(), String.t()) :: {:ok, grant()} | {:error, term()}
+  @spec exchange_code(String.t(), String.t()) :: {:ok, Shelly.Client.t()} | {:error, term()}
   def exchange_code(code, client_id \\ @default_client_id) when is_binary(code) do
     server = server_from_jwt(code) || @fallback_server
 
@@ -113,26 +96,26 @@ defmodule Shelly.OAuth do
   account's own server, sending the stored refresh token when there is
   one and the current access token otherwise.
 
-  Takes the same account map as the rest of the library
-  (`%{server: url, token: token}`, e.g. from `to_account/1`), plus an
-  optional `:refresh_token`.
+  Takes the client whose token is expiring and returns a fresh one,
+  carrying the refresh token and expiry forward.
 
   Returns `{:ok, result}` shaped exactly like `exchange_code/2` when the
   server plays along, `{:error, :refresh_unsupported}` when it rejects
   the attempt (the expected outcome today — re-authorize the user
   instead), or `{:error, reason}` on transport failure.
 
-      case Shelly.OAuth.refresh(account) do
-        {:ok, %{access_token: token, expires_at: at}} -> store(token, at)
+      case Shelly.OAuth.refresh(client) do
+        {:ok, refreshed} -> store(refreshed.token, refreshed.expires_at)
         {:error, :refresh_unsupported} -> ask_user_to_reconnect()
       end
   """
-  @spec refresh(map(), String.t()) ::
-          {:ok, grant()} | {:error, :refresh_unsupported | :no_token | term()}
+  @spec refresh(Shelly.Client.t(), String.t()) ::
+          {:ok, Shelly.Client.t()} | {:error, :refresh_unsupported | :no_token | term()}
   def refresh(account, client_id \\ @default_client_id)
 
-  def refresh(%{server: server, token: token} = account, client_id) when is_binary(token) do
-    refresh_token = Map.get(account, :refresh_token) || token
+  def refresh(%Shelly.Client{server: server, token: token} = client, client_id)
+      when is_binary(token) do
+    refresh_token = client.refresh_token || token
 
     result =
       Shelly.HTTP.request(
@@ -143,14 +126,17 @@ defmodule Shelly.OAuth do
           receive_timeout: 15_000,
           retry: false
         ],
-        account
+        client
       )
 
     case result do
       {:ok, %{status: 200, body: body}} ->
         case extract_token(body) do
-          new_token when is_binary(new_token) -> {:ok, token_result(new_token, body, server)}
-          nil -> {:error, :refresh_unsupported}
+          new_token when is_binary(new_token) ->
+            {:ok, token_result(new_token, body, server, client)}
+
+          nil ->
+            {:error, :refresh_unsupported}
         end
 
       # 429 and 408 mean "later", not "never" — reporting them as
@@ -170,20 +156,38 @@ defmodule Shelly.OAuth do
     end
   end
 
-  def refresh(_account, _client_id), do: {:error, :no_token}
+  def refresh(_client, _client_id), do: {:error, :no_token}
 
-  defp token_result(token, body, server) do
+  defp token_result(token, body, server, previous \\ nil) do
     claims = peek_jwt(token) || %{}
     api_url = normalize_url(claims["user_api_url"] || server)
 
-    %{
-      access_token: token,
-      refresh_token: extract_refresh_token(body),
-      expires_at: expires_at(claims),
-      user_api_url: api_url,
-      label: claims["email"] || claims["user"] || URI.parse(api_url).host
-    }
+    # A refresh keeps everything the previous client carried that the
+    # response doesn't replace — including the auth key, the pacing key,
+    # and a refresh token the server chose not to reissue.
+    carried = carried_over(previous)
+
+    Shelly.Client.new(
+      Keyword.merge(carried,
+        server: api_url,
+        token: token,
+        refresh_token: extract_refresh_token(body) || carried[:refresh_token],
+        expires_at: expires_at(claims),
+        label: claims["email"] || claims["user"] || URI.parse(api_url).host
+      )
+    )
   end
+
+  defp carried_over(%Shelly.Client{} = previous) do
+    [
+      refresh_token: previous.refresh_token,
+      auth_key: previous.auth_key,
+      rate_key: previous.rate_key,
+      req_options: previous.req_options
+    ]
+  end
+
+  defp carried_over(_previous), do: []
 
   defp expires_at(%{"exp" => exp}) when is_integer(exp) do
     case DateTime.from_unix(exp) do
@@ -193,24 +197,6 @@ defmodule Shelly.OAuth do
   end
 
   defp expires_at(_claims), do: nil
-
-  @doc """
-  Convert an `exchange_code/2` result into the account map that
-  `Shelly.Account`, `Shelly.Events` and `refresh/2` take.
-
-  Carries the refresh token and expiry through: `refresh/2` reads
-  `:refresh_token` from this map, and dropping it here meant the
-  documented path quietly sent the *access* token as the refresh token.
-  """
-  @spec to_account(grant()) :: map()
-  def to_account(%{access_token: token, user_api_url: url} = grant) do
-    %{
-      server: url,
-      token: token,
-      refresh_token: Map.get(grant, :refresh_token),
-      expires_at: Map.get(grant, :expires_at)
-    }
-  end
 
   @doc "Read a JWT's payload without verification (routing only — do not trust)."
   @spec peek_jwt(String.t() | nil) :: map() | nil

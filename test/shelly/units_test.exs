@@ -83,61 +83,69 @@ defmodule Shelly.UnitsTest do
       assert Shelly.OAuth.peek_jwt(nil) == nil
     end
 
-    test "to_account bridges the exchange result shape" do
-      grant = %{access_token: "tok", user_api_url: "https://s.shelly.cloud", label: "x"}
+    test "a client knows whether its token is still good" do
+      live =
+        Shelly.Client.new(
+          server: "https://s.shelly.cloud",
+          token: "tok",
+          expires_at: DateTime.add(DateTime.utc_now(), 3600)
+        )
 
-      assert Shelly.OAuth.to_account(grant) == %{
-               server: "https://s.shelly.cloud",
-               token: "tok",
-               refresh_token: nil,
-               expires_at: nil
-             }
+      dead = %{live | expires_at: DateTime.add(DateTime.utc_now(), -60)}
+      keyless = Shelly.Client.new(server: "https://s.shelly.cloud", auth_key: "key")
+
+      refute Shelly.Client.expired?(live)
+      assert Shelly.Client.expired?(dead)
+      # No token at all counts as expired, and no expiry recorded counts
+      # as live — the cloud is the real authority.
+      assert Shelly.Client.expired?(keyless)
+
+      refute Shelly.Client.expired?(
+               Shelly.Client.new(server: "https://s.shelly.cloud", token: "t")
+             )
+
+      assert Shelly.Client.expires_in(live) > 3500
+      assert Shelly.Client.expires_in(keyless) == nil
     end
 
-    test "to_account carries the refresh token and expiry refresh/2 needs" do
-      # Dropping these made the documented refresh path send the access
-      # token as the refresh token.
-      expires_at = DateTime.from_unix!(1_785_307_752)
+    test "a client reports which transports it can use" do
+      oauth = Shelly.Client.new(server: "https://s.shelly.cloud", token: "tok")
+      keyed = Shelly.Client.new(server: "https://s.shelly.cloud", auth_key: "key")
+      both = Shelly.Client.put_auth_key(oauth, "key")
 
-      grant = %{
-        access_token: "tok",
-        user_api_url: "https://s.shelly.cloud",
-        refresh_token: "refresh-me",
-        expires_at: expires_at,
-        label: "someone@example.com"
-      }
-
-      account = Shelly.OAuth.to_account(grant)
-      assert account.refresh_token == "refresh-me"
-      assert account.expires_at == expires_at
+      assert Shelly.Client.oauth?(oauth)
+      refute Shelly.Client.keyed?(oauth)
+      assert Shelly.Client.keyed?(keyed)
+      refute Shelly.Client.oauth?(keyed)
+      assert Shelly.Client.oauth?(both) and Shelly.Client.keyed?(both)
     end
-  end
 
-  describe "Shelly.Account.expand_channels/1" do
-    test "multi-channel devices expand to one row per channel" do
-      devices = %{
-        "AABBCCDDEEFF" => %{"name" => "Pro", "channels_count" => 3, "type" => "SPSW", "gen" => 2},
-        "112233445566" => %{"name" => "Plug", "type" => "SNPL", "cloud_online" => true}
-      }
+    test "the server is normalized, and a missing one is a loud error" do
+      assert Shelly.Client.new(server: "SHELLY-74-EU.shelly.cloud").server ==
+               "https://shelly-74-eu.shelly.cloud"
 
-      rows = Shelly.Account.expand_channels(devices)
-
-      assert length(rows) == 4
-      pro_rows = Enum.filter(rows, &(&1.id == "aabbccddeeff"))
-      assert Enum.map(pro_rows, & &1.channel) |> Enum.sort() == [0, 1, 2]
-      assert hd(pro_rows).name =~ "· ch"
-
-      plug = Enum.find(rows, &(&1.id == "112233445566"))
-      assert plug.name == "Plug"
-      assert plug.online
+      assert_raise ArgumentError, fn -> Shelly.Client.new(token: "tok") end
     end
-  end
 
-  describe "Shelly.CloudV2.get_statuses/2 guard" do
-    test "more than 10 ids returns an error tuple, not a crash" do
-      conn = %{server: "https://example.invalid", auth_key: "k"}
-      ids = Enum.map(1..11, &"device-#{&1}")
-      assert Shelly.CloudV2.get_statuses(conn, ids) == {:error, :too_many_ids}
+    test "a non-default port survives normalization" do
+      # Dropping it would quietly send a proxied or test client to 443.
+      assert Shelly.Client.new(server: "https://127.0.0.1:4040").server ==
+               "https://127.0.0.1:4040"
+
+      assert Shelly.Client.new(server: "https://s.shelly.cloud:443").server ==
+               "https://s.shelly.cloud"
+    end
+
+    test "one account is one rate budget, whatever the credential" do
+      # Without an explicit key the credential stands in, so a token
+      # refresh would silently start a fresh budget.
+      stable = Shelly.Client.new(server: "https://s.shelly.cloud", token: "a", rate_key: 7)
+      refreshed = %{stable | token: "b"}
+
+      assert Shelly.Client.rate_key(stable) == Shelly.Client.rate_key(refreshed)
+
+      implicit = Shelly.Client.new(server: "https://s.shelly.cloud", token: "a")
+      assert Shelly.Client.rate_key(implicit) != Shelly.Client.rate_key(%{implicit | token: "b"})
     end
   end
 end

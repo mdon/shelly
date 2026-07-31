@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.3.0
+
+Credentials became a struct. Every function previously took an ad-hoc map
+(`%{server:, token:}` for OAuth, `%{server:, auth_key:}` for the key APIs,
+plus optional `:rate_key` / `:req_options` keys nothing declared), which
+left the shape of the library's central concept implied rather than
+stated. **`Shelly.Client` now is that concept**, and every entry point
+takes one.
+
+Breaking, deliberately: 0.2.x had no users to protect, and this is far
+cheaper to change now than after it sets.
+
+```elixir
+{:ok, client} = Shelly.OAuth.exchange_code(code)
+client = Shelly.Client.put_rate_key(client, account.id)
+
+{:ok, statuses} = Shelly.Account.all_statuses(client)
+{:ok, _pid} = Shelly.Events.start_link(client, handler: &handle/1)
+```
+
+- `Shelly.OAuth.exchange_code/2` and `refresh/2` return a client instead
+  of a bare grant map; `to_account/1` is gone, since the client *is* the
+  account. A refresh now carries the auth key, pacing key and request
+  options forward, and no longer wipes a stored refresh token when the
+  server declines to reissue one.
+- `Shelly.Account`, `Shelly.CloudV1` and `Shelly.CloudV2` take a client.
+  One client can hold **both** credentials, which is how control survives
+  a token expiry: realtime and discovery need OAuth, switching doesn't.
+- `Shelly.Events.start_link/2` takes a client rather than loose
+  `:server`/`:token` options, and returns `{:error, :no_token}` for a
+  key-only client instead of opening a socket that can't authenticate.
+- New: `Shelly.Client.expired?/1`, `expires_in/1`, `oauth?/1`, `keyed?/1`,
+  `put_auth_key/2`, `put_rate_key/2`, `put_req_options/2`. Servers are
+  normalized to `https://host[:port]` — the port is preserved, which an
+  earlier draft of this dropped, silently sending anything on a custom
+  port to 443.
+
+### Fixed
+
+- `Shelly.CloudV2` reported a **rejected control command as success**.
+  Shelly answers a refused switch with HTTP 200 and `"isok": false`, and
+  only the status code was being checked, so `set_switch/5`,
+  `set_cover/5` and `set_light/4` returned `:ok` for commands the cloud
+  declined. Found by the first HTTP-level test of that module.
+
 ## v0.2.1
 
 A pre-publish review (six external models plus a verification pass against

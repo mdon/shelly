@@ -7,9 +7,7 @@ defmodule Shelly.Events do
   events in its own right — persistence, PubSub, whatever — while this
   process owns the connection and reconnects with backoff:
 
-      Shelly.Events.start_link(
-        server: account.user_api_url,
-        token: account.access_token,
+      Shelly.Events.start_link(client,
         handler: fn
           {:status, device_id, status} -> MyApp.handle_status(device_id, status)
           {:online, device_id, online?} -> MyApp.handle_online(device_id, online?)
@@ -39,13 +37,20 @@ defmodule Shelly.Events do
 
   require Logger
 
-  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
-  def start_link(opts) do
-    server = Keyword.fetch!(opts, :server)
-    token = Keyword.fetch!(opts, :token)
+  @doc """
+  Open the realtime socket for a client.
+
+  Requires an OAuth token — the websocket has no auth-key equivalent.
+  Options: `:handler` (required, arity-1), `:name` (optional).
+  """
+  @spec start_link(Shelly.Client.t(), keyword()) ::
+          {:ok, pid()} | {:error, :no_token | :invalid_server_url | term()}
+  def start_link(client, opts \\ [])
+
+  def start_link(%Shelly.Client{token: token} = client, opts) when is_binary(token) do
     handler = Keyword.fetch!(opts, :handler)
 
-    host = URI.parse(server).host || server
+    host = URI.parse(client.server).host || client.server
     url = "wss://#{host}:6113/shelly/wss/hk_sock?t=#{token}"
 
     state = %{handler: handler, label: host, attempt: 0, connected_at: nil}
@@ -58,6 +63,8 @@ defmodule Shelly.Events do
     )
     |> sanitize_start_error()
   end
+
+  def start_link(%Shelly.Client{}, _opts), do: {:error, :no_token}
 
   # The connection URL carries the access token (Shelly's protocol), and
   # WebSockex.URLError embeds the URL it was given. Returning that

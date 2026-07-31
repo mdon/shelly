@@ -21,7 +21,10 @@ defmodule Shelly.AccountTest do
     |> Plug.Conn.send_resp(200, Jason.encode!(body))
   end
 
-  @account %{server: "https://shelly-74-eu.shelly.cloud", token: "tok"}
+  defp account(fun \\ nil) do
+    client = Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: "tok")
+    if fun, do: Shelly.Client.put_req_options(client, plug: fun), else: client
+  end
 
   describe "all_statuses/1" do
     test "keys by _dev_info.id, which is the id devices are addressed by" do
@@ -41,7 +44,7 @@ defmodule Shelly.AccountTest do
         })
       end)
 
-      assert {:ok, statuses} = Shelly.Account.all_statuses(@account)
+      assert {:ok, statuses} = Shelly.Account.all_statuses(account())
       assert Map.has_key?(statuses, "485519999340")
       refute Map.has_key?(statuses, "some-inconsistent-key")
     end
@@ -54,7 +57,7 @@ defmodule Shelly.AccountTest do
         })
       end)
 
-      assert {:ok, statuses} = Shelly.Account.all_statuses(@account)
+      assert {:ok, statuses} = Shelly.Account.all_statuses(account())
       assert Map.has_key?(statuses, "0cdc7ef76644")
     end
 
@@ -65,7 +68,7 @@ defmodule Shelly.AccountTest do
         |> Plug.Conn.send_resp(401, Jason.encode!(%{"isok" => false}))
       end)
 
-      assert {:error, {:shelly_http, 401, _}} = Shelly.Account.all_statuses(@account)
+      assert {:error, {:shelly_http, 401, _}} = Shelly.Account.all_statuses(account())
     end
   end
 

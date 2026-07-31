@@ -11,10 +11,23 @@ defmodule Shelly.ClientsEdgeTest do
     :ok
   end
 
-  @account %{server: "https://shelly-74-eu.shelly.cloud", token: "tok", rate_key: :edge}
-  @conn %{server: "https://shelly-74-eu.shelly.cloud", auth_key: "key", rate_key: :edge}
+  defp account,
+    do:
+      Shelly.Client.new(
+        server: "https://shelly-74-eu.shelly.cloud",
+        token: "tok",
+        rate_key: :edge
+      )
 
-  defp with_plug(map, fun), do: Map.put(map, :req_options, plug: fun)
+  defp keyed,
+    do:
+      Shelly.Client.new(
+        server: "https://shelly-74-eu.shelly.cloud",
+        auth_key: "key",
+        rate_key: :edge
+      )
+
+  defp with_plug(client, fun), do: Shelly.Client.put_req_options(client, plug: fun)
 
   defp json(conn, status \\ 200, body) do
     conn
@@ -25,7 +38,7 @@ defmodule Shelly.ClientsEdgeTest do
   describe "Account" do
     test "list_devices returns the device map and sends the bearer token" do
       account =
-        with_plug(@account, fn conn ->
+        with_plug(account(), fn conn ->
           assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer tok"]
 
           json(conn, %{
@@ -39,19 +52,19 @@ defmodule Shelly.ClientsEdgeTest do
     end
 
     test "a rejected listing is an error" do
-      account = with_plug(@account, fn conn -> json(conn, 401, %{"isok" => false}) end)
+      account = with_plug(account(), fn conn -> json(conn, 401, %{"isok" => false}) end)
       assert {:error, {:shelly_http, 401, _}} = Shelly.Account.list_devices(account)
     end
 
     test "set_switch speaks the relay vocabulary and reports rejection" do
       ok =
-        with_plug(@account, fn conn ->
+        with_plug(account(), fn conn ->
           {:ok, body, conn} = Plug.Conn.read_body(conn)
           assert body =~ "turn=on"
           json(conn, %{"isok" => true})
         end)
 
-      rejected = with_plug(@account, fn conn -> json(conn, %{"isok" => false}) end)
+      rejected = with_plug(account(), fn conn -> json(conn, %{"isok" => false}) end)
 
       assert Shelly.Account.set_switch(ok, "485519999340", 0, true) == :ok
       assert {:error, _} = Shelly.Account.set_switch(rejected, "485519999340", 0, true)
@@ -93,8 +106,8 @@ defmodule Shelly.ClientsEdgeTest do
       )
 
       assert {:ok, grant} = Shelly.OAuth.exchange_code("header.#{token}.sig")
-      refute grant.user_api_url =~ "evil.example.com"
-      assert grant.user_api_url =~ ".shelly.cloud"
+      refute grant.server =~ "evil.example.com"
+      assert grant.server =~ ".shelly.cloud"
     end
 
     test "an uppercase Shelly host is accepted, not rerouted" do
@@ -108,7 +121,7 @@ defmodule Shelly.ClientsEdgeTest do
       )
 
       assert {:ok, grant} = Shelly.OAuth.exchange_code("header.#{token}.sig")
-      assert grant.user_api_url == "https://shelly-74-eu.shelly.cloud"
+      assert grant.server == "https://shelly-74-eu.shelly.cloud"
     end
 
     test "a response with no token at all is an error" do
@@ -123,7 +136,7 @@ defmodule Shelly.ClientsEdgeTest do
       # 429 used to read as "this grant is dead", sending the app to
       # re-authorize a token that was merely being throttled.
       account =
-        with_plug(@account, fn conn -> json(conn, 429, %{"error" => "too many requests"}) end)
+        with_plug(account(), fn conn -> json(conn, 429, %{"error" => "too many requests"}) end)
 
       assert {:error, {:oauth_http, 429, _}} = Shelly.OAuth.refresh(account)
     end
@@ -133,18 +146,19 @@ defmodule Shelly.ClientsEdgeTest do
     test "a transport failure surfaces as an error tuple, not a raise" do
       # A closed port is the honest simulation: a plug that raises would
       # test Req's exception path, not ours.
-      conn = %{
-        server: "https://127.0.0.1:1",
-        auth_key: "key",
-        rate_key: :edge,
-        req_options: [retry: false, connect_options: [timeout: 200]]
-      }
+      conn =
+        Shelly.Client.new(
+          server: "https://127.0.0.1:1",
+          auth_key: "key",
+          rate_key: :edge,
+          req_options: [retry: false, connect_options: [timeout: 200]]
+        )
 
       assert {:error, %Req.TransportError{}} = Shelly.CloudV1.get_status(conn, "b923fa")
     end
 
     test "a rejected command reports the status" do
-      conn = with_plug(@conn, fn conn -> json(conn, 403, %{"isok" => false}) end)
+      conn = with_plug(keyed(), fn conn -> json(conn, 403, %{"isok" => false}) end)
       assert {:error, {:shelly_http, 403, _}} = Shelly.CloudV1.set_switch(conn, "b923fa", 0, true)
     end
   end

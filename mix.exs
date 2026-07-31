@@ -1,7 +1,7 @@
 defmodule Shelly.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.3.0"
   @source_url "https://github.com/mdon/shelly"
 
   # So `mix precommit` runs its test step in :test rather than :dev.

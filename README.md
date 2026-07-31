@@ -35,36 +35,37 @@ children = [
 # Send the user to Shelly's own login (popup works well):
 Shelly.OAuth.authorize_url("https://myapp.example/oauth/callback")
 
-# In your callback, exchange the ?code= param:
-{:ok, grant} = Shelly.OAuth.exchange_code(code)
-account = Shelly.OAuth.to_account(grant)
+# In your callback, exchange the ?code= param — you get a ready client:
+{:ok, client} = Shelly.OAuth.exchange_code(code)
 
-# Store grant.expires_at and grant.refresh_token too — an access token
-# lasts 12 hours, after which everything below returns 401. Renew before
-# the deadline with Shelly.OAuth.refresh/2, and treat
+# Persist client.token, client.expires_at and client.refresh_token: an
+# access token lasts 12 hours, after which everything below returns 401.
+# Renew with Shelly.OAuth.refresh/2 before the deadline, and treat
 # {:error, :refresh_unsupported} as "send the user through the login
 # again" (auth keys, further down, never expire).
 
+# Rate limiting is per account, so give the client a stable pacing key
+# rather than letting the credential stand in for one:
+client = Shelly.Client.put_rate_key(client, account.id)
+
 # Every device on the account — user-given names, models, channel counts:
-{:ok, devices} = Shelly.Account.list_devices(account)
+{:ok, devices} = Shelly.Account.list_devices(client)
 rows = Shelly.Account.expand_channels(devices)
 
 # Whole-account status in ONE call:
-{:ok, statuses} = Shelly.Account.all_statuses(account)
+{:ok, statuses} = Shelly.Account.all_statuses(client)
 parsed = Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
 # => %{on: true, watts: 2.4, voltage: 230.4, energy_wh: 2265635.7,
 #      temp_c: 55.9, rssi: -66, component: "switch", metered: true, ...}
 
 # Control:
-:ok = Shelly.Account.set_switch(account, "0cdc7ef76644", 0, false)
+:ok = Shelly.Account.set_switch(client, "0cdc7ef76644", 0, false)
 ```
 
 ## Real-time events
 
 ```elixir
-Shelly.Events.start_link(
-  server: account.server,
-  token: account.token,
+Shelly.Events.start_link(client,
   handler: fn
     {:status, device_id, status} ->
       # Guard: events may be partial deltas (only sys/input/battery
@@ -82,22 +83,40 @@ Shelly.Events.start_link(
 )
 ```
 
-## Auth-key APIs
+A parsed status reports `on: nil` when the payload named the component
+but carried no state for it — unknown, not off. Treat it as "keep what
+you know".
 
-When OAuth isn't an option, the classic auth key still works (Shelly
-app → Settings → User Settings → Access And Permissions → "Get key" —
-key and server are shown together):
+## Auth-key APIs, and surviving expiry
+
+The classic auth key (Shelly app → Settings → User Settings → Access And
+Permissions → "Get key" — key and server are shown together) authorizes
+the v2/v1 APIs and never expires:
 
 ```elixir
-conn = %{server: "https://shelly-XX-eu.shelly.cloud", auth_key: key}
+client = Shelly.Client.new(server: "https://shelly-XX-eu.shelly.cloud", auth_key: key)
 
-{:ok, by_id} = Shelly.CloudV2.get_statuses(conn, [id1, id2])   # ≤ 10 ids
-:ok = Shelly.CloudV2.set_switch(conn, id1, 0, true, toggle_after: 7200)
+{:ok, by_id} = Shelly.CloudV2.get_statuses(client, [id1, id2])   # ≤ 10 ids
+:ok = Shelly.CloudV2.set_switch(client, id1, 0, true, toggle_after: 7200)
 ```
 
 `toggle_after` is a watchdog executed by Shelly's own cloud — the relay
 reverts even if your app is down. `Shelly.CloudV1` exists as a fallback
 for the deprecated legacy endpoints.
+
+One client can hold both credentials, which is how you keep control
+working through a token expiry — only realtime and device discovery
+genuinely need OAuth:
+
+```elixir
+client = Shelly.Client.put_auth_key(oauth_client, key)
+
+if Shelly.Client.expired?(client) do
+  Shelly.CloudV2.set_switch(client, id, 0, true)   # key path, still fine
+else
+  Shelly.Account.set_switch(client, id, 0, true)
+end
+```
 
 ## What the parser understands
 

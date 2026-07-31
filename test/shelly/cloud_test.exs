@@ -8,13 +8,15 @@ defmodule Shelly.CloudTest do
 
   use ExUnit.Case, async: true
 
-  @conn %{
-    server: "https://shelly-74-eu.shelly.cloud",
-    auth_key: "key-123",
-    rate_key: :test_account
-  }
+  defp base do
+    Shelly.Client.new(
+      server: "https://shelly-74-eu.shelly.cloud",
+      auth_key: "key-123",
+      rate_key: :test_account
+    )
+  end
 
-  defp conn(fun), do: Map.put(@conn, :req_options, plug: fun)
+  defp conn(fun), do: Shelly.Client.put_req_options(base(), plug: fun)
 
   defp json(conn, status \\ 200, body) do
     conn
@@ -43,7 +45,7 @@ defmodule Shelly.CloudTest do
 
     test "refuses more than the API's ten ids rather than truncating" do
       ids = Enum.map(1..11, &"device#{&1}")
-      assert Shelly.CloudV2.get_statuses(@conn, ids) == {:error, :too_many_ids}
+      assert Shelly.CloudV2.get_statuses(base(), ids) == {:error, :too_many_ids}
     end
 
     test "an HTTP error surfaces with its status" do

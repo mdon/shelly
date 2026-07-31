@@ -3,24 +3,12 @@ defmodule Shelly.Account do
   Account-level Shelly Cloud API, authorized by an OAuth access token
   (`Authorization: Bearer`) — no per-device auth keys needed.
 
-  An *account* here is a plain map (or any struct) with:
-
-    * `:server` — the account's cloud server, e.g.
-      `"https://shelly-74-eu.shelly.cloud"` (from `Shelly.OAuth`'s
-      `user_api_url`)
-    * `:token` — the OAuth access token
-    * `:rate_key` — *optional*, a stable identifier for the account
-      (e.g. its id). Rate limiting is per account, so setting this keeps
-      one budget across token refreshes and across the auth-key clients;
-      without it the token itself is the key.
-    * `:req_options` — *optional* keyword list merged into every Req
-      call (proxy, timeouts, a `:plug` stub in tests)
+  Every function takes a `Shelly.Client` holding a `:token`, usually
+  straight from `Shelly.OAuth.exchange_code/2`.
 
   All calls are paced through `Shelly.RateGate` when it is running
   (~1 request/second/account is the cloud's limit).
   """
-
-  @type account :: %{server: String.t(), token: String.t()}
 
   @doc """
   List every device on the account (`get_all_lists`): id, user-given
@@ -29,9 +17,9 @@ defmodule Shelly.Account do
   Returns `{:ok, devices}` where `devices` is the raw map keyed by
   device id — see `expand_channels/1` for a flattened per-channel list.
   """
-  @spec list_devices(account()) :: {:ok, map()} | {:error, term()}
-  def list_devices(account) do
-    case post(account, "/interface/device/get_all_lists", []) do
+  @spec list_devices(Shelly.Client.t()) :: {:ok, map()} | {:error, term()}
+  def list_devices(%Shelly.Client{} = client) do
+    case post(client, "/interface/device/get_all_lists", []) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices" => devices}}}} ->
         {:ok, devices}
 
@@ -86,9 +74,10 @@ defmodule Shelly.Account do
   devices), and a caller looking a device up by id would silently miss
   it. The outer key is the fallback when an entry carries no `_dev_info`.
   """
-  @spec all_statuses(account()) :: {:ok, %{optional(String.t()) => map()}} | {:error, term()}
-  def all_statuses(account) do
-    case post(account, "/device/all_status", show_info: true) do
+  @spec all_statuses(Shelly.Client.t()) ::
+          {:ok, %{optional(String.t()) => map()}} | {:error, term()}
+  def all_statuses(%Shelly.Client{} = client) do
+    case post(client, "/device/all_status", show_info: true) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices_status" => statuses}}}} ->
         {:ok, Map.new(statuses, fn {key, st} -> {status_key(key, st), st} end)}
 
@@ -108,11 +97,12 @@ defmodule Shelly.Account do
   end
 
   @doc "Switch a relay channel on or off."
-  @spec set_switch(account(), String.t(), non_neg_integer(), boolean()) :: :ok | {:error, term()}
-  def set_switch(account, device_id, channel, on?) when is_boolean(on?) do
+  @spec set_switch(Shelly.Client.t(), String.t(), non_neg_integer(), boolean()) ::
+          :ok | {:error, term()}
+  def set_switch(%Shelly.Client{} = client, device_id, channel, on?) when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 
-    case post(account, "/device/relay/control", body) do
+    case post(client, "/device/relay/control", body) do
       {:ok, %{status: 200, body: %{"isok" => true}}} -> :ok
       other -> error(other)
     end
@@ -138,31 +128,24 @@ defmodule Shelly.Account do
   defp online?(%{"_dev_info" => %{"online" => online}}), do: online in [1, "true"]
   defp online?(status), do: get_in(status, ["cloud", "connected"]) == true
 
-  defp post(account, path, form) do
-    case Shelly.RateGate.run(rate_key(account), fn ->
+  defp post(%Shelly.Client{} = client, path, form) do
+    case Shelly.RateGate.run(Shelly.Client.rate_key(client), fn ->
            Shelly.HTTP.request(
              [
                method: :post,
-               url: account.server <> path,
-               headers: [{"Authorization", "Bearer " <> account.token}],
+               url: client.server <> path,
+               headers: [{"Authorization", "Bearer " <> client.token}],
                form: form,
                receive_timeout: 15_000,
                retry: false
              ],
-             account
+             client
            )
          end) do
       {:error, :throttled} -> {:error, :throttled}
       other -> other
     end
   end
-
-  # Shelly's ~1 req/s budget is per ACCOUNT, so the pacing key must not
-  # change when the token is refreshed (a fresh key would let a burst
-  # through) and must be shareable with the auth-key clients. Callers can
-  # set `:rate_key` explicitly; otherwise the token is the fallback.
-  defp rate_key(%{rate_key: key}) when not is_nil(key), do: {:shelly_account, key}
-  defp rate_key(account), do: {account.server, account.token}
 
   defp error({:ok, %{status: status, body: body}}), do: {:error, {:shelly_http, status, body}}
   defp error({:error, reason}), do: {:error, reason}

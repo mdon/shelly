@@ -74,12 +74,15 @@ defmodule Shelly.EventsReconnectTest do
     # the access token as a query parameter.
     # An empty or unparseable server yields WebSockex.URLError, which
     # embeds the URL — and ours carries the token as a query parameter.
-    for server <- ["", "wss://", ":::"] do
-      assert Shelly.Events.start_link(
-               server: server,
-               token: "secret-token",
-               handler: fn _ -> :ok end
-             ) == {:error, :invalid_server_url}
+    for server <- ["wss://", ":::"] do
+      client = Shelly.Client.new(server: server, token: "secret-token")
+
+      assert Shelly.Events.start_link(client, handler: fn _ -> :ok end) ==
+               {:error, :invalid_server_url}
     end
+
+    # A client with no token can't open the socket at all.
+    keyed = Shelly.Client.new(server: "https://s.shelly.cloud", auth_key: "key")
+    assert Shelly.Events.start_link(keyed, handler: fn _ -> :ok end) == {:error, :no_token}
   end
 end

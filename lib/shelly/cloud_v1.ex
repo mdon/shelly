@@ -5,10 +5,9 @@ defmodule Shelly.CloudV1 do
   removal — prefer `Shelly.CloudV2` (same auth key) or the OAuth
   `Shelly.Account` API. Kept as a fallback.
 
-  Takes the same `conn` map as `Shelly.CloudV2`.
+  Takes the same `Shelly.Client` as `Shelly.CloudV2` — one holding an
+  `:auth_key`.
   """
-
-  @type conn :: Shelly.CloudV2.conn()
 
   @doc """
   Full status for one device, as `{:ok, {device_status, online}}` —
@@ -20,7 +19,7 @@ defmodule Shelly.CloudV1 do
   handed callers a map `Shelly.Status.parse/4` reads as `"unknown"` with
   `on: false` — a device that looks permanently off.
   """
-  @spec get_status(conn(), String.t()) :: {:ok, {map(), boolean()}} | {:error, term()}
+  @spec get_status(Shelly.Client.t(), String.t()) :: {:ok, {map(), boolean()}} | {:error, term()}
   def get_status(conn, device_id) do
     case post(conn, "/device/status", id: device_id) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => data}}} when is_map(data) ->
@@ -32,7 +31,8 @@ defmodule Shelly.CloudV1 do
   end
 
   @doc "Switch a relay channel on or off."
-  @spec set_switch(conn(), String.t(), non_neg_integer(), boolean()) :: :ok | {:error, term()}
+  @spec set_switch(Shelly.Client.t(), String.t(), non_neg_integer(), boolean()) ::
+          :ok | {:error, term()}
   def set_switch(conn, device_id, channel, on?) when is_boolean(on?) do
     body = [id: device_id, channel: channel, turn: if(on?, do: "on", else: "off")]
 
@@ -43,7 +43,7 @@ defmodule Shelly.CloudV1 do
   end
 
   defp post(conn, path, form) do
-    Shelly.RateGate.run(rate_key(conn), fn ->
+    Shelly.RateGate.run(Shelly.Client.rate_key(conn), fn ->
       Shelly.HTTP.request(
         [
           method: :post,
@@ -56,9 +56,6 @@ defmodule Shelly.CloudV1 do
       )
     end)
   end
-
-  defp rate_key(%{rate_key: key}) when not is_nil(key), do: {:shelly_account, key}
-  defp rate_key(conn), do: {conn.server, conn.auth_key}
 
   defp error({:ok, %{status: status, body: body}}), do: {:error, {:shelly_http, status, body}}
   defp error({:error, reason}), do: {:error, reason}

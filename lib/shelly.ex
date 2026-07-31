@@ -8,14 +8,16 @@ defmodule Shelly do
 
   ## The pieces
 
+    * `Shelly.Client` — one struct holding an account's server,
+      credentials and pacing key. Everything else takes one.
     * `Shelly.OAuth` — "connect your Shelly account" authorization-code
-      flow; yields an access token (**12 hours**), its expiry, and the
-      account's cloud server.
+      flow; yields a client whose access token lasts **12 hours**.
     * `Shelly.Account` — token-authorized account API: list all devices
       (names, models, channels), whole-account status in one call,
       relay control. **The recommended path** — no auth keys.
     * `Shelly.CloudV2` — auth-key API: bulk status (≤10 devices),
-      switch/cover/light control, `toggle_after` watchdog.
+      switch/cover/light control, `toggle_after` watchdog. The key
+      doesn't expire, so this keeps working when a token lapses.
     * `Shelly.CloudV1` — the deprecated legacy API, kept as a fallback.
     * `Shelly.Events` — real-time websocket per account with a handler
       callback (status changes, online transitions).
@@ -37,19 +39,38 @@ defmodule Shelly do
       # 2. Send the user to Shelly's login:
       Shelly.OAuth.authorize_url("https://myapp.example/oauth/callback")
 
-      # 3. In your callback:
-      {:ok, grant} = Shelly.OAuth.exchange_code(code)
-      account = Shelly.OAuth.to_account(grant)
+      # 3. In your callback — this hands back a ready client:
+      {:ok, client} = Shelly.OAuth.exchange_code(code)
+
+      # Persist client.token, client.expires_at and client.refresh_token,
+      # and give the client a stable pacing key once you have an id:
+      client = Shelly.Client.put_rate_key(client, account.id)
 
       # 4. Devices + live data:
-      {:ok, devices} = Shelly.Account.list_devices(account)
-      {:ok, statuses} = Shelly.Account.all_statuses(account)
+      {:ok, devices} = Shelly.Account.list_devices(client)
+      {:ok, statuses} = Shelly.Account.all_statuses(client)
 
       parsed = Shelly.Account.parse_status(statuses["0cdc7ef76644"], 0)
       # => %{on: true, watts: 2.4, component: "switch", metered: true, ...}
 
       # 5. Control:
-      :ok = Shelly.Account.set_switch(account, "0cdc7ef76644", 0, false)
+      :ok = Shelly.Account.set_switch(client, "0cdc7ef76644", 0, false)
+
+      # 6. Realtime:
+      {:ok, _pid} = Shelly.Events.start_link(client, handler: &handle_event/1)
+
+  ## Surviving token expiry
+
+  Attach the account's auth key and control keeps working after the
+  12-hour token dies — only realtime and device discovery need OAuth:
+
+      client = Shelly.Client.put_auth_key(client, key)
+
+      if Shelly.Client.expired?(client) do
+        Shelly.CloudV2.set_switch(client, id, 0, true)
+      else
+        Shelly.Account.set_switch(client, id, 0, true)
+      end
 
   ## Field notes baked into this library
 

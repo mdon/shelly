@@ -4,10 +4,8 @@ defmodule Shelly.CloudV2 do
   (Shelly app → Settings → User Settings → Access And Permissions →
   "Get key" — the key and the server URI are shown together).
 
-  A *conn* is a plain map with:
-
-    * `:server` — e.g. `"https://shelly-74-eu.shelly.cloud"`
-    * `:auth_key` — the account's authorization cloud key
+  Takes a `Shelly.Client` holding an `:auth_key` (Shelly app → Settings →
+  User Settings → Access And Permissions → "Get key").
 
   Rate limit: ~1 request/second/account (paced via `Shelly.RateGate`
   when running). Status supports up to 10 devices per call.
@@ -15,13 +13,6 @@ defmodule Shelly.CloudV2 do
   Note: the v2 API takes the auth key as a query parameter (Shelly's
   design) — be aware that intermediary proxies may log query strings.
   """
-
-  @type conn :: %{
-          :server => String.t(),
-          :auth_key => String.t(),
-          optional(:rate_key) => term(),
-          optional(:req_options) => keyword()
-        }
 
   @doc """
   Bulk status for up to 10 device ids. Returns
@@ -32,7 +23,7 @@ defmodule Shelly.CloudV2 do
       Shelly.Status.parse(el["status"], channel, el["online"] in [1, true],
         %{model: el["code"], gen: Shelly.Status.gen_to_int(el["gen"])})
   """
-  @spec get_statuses(conn(), [String.t()]) ::
+  @spec get_statuses(Shelly.Client.t(), [String.t()]) ::
           {:ok, %{optional(String.t()) => map()}} | {:error, term()}
   def get_statuses(conn, device_ids) when is_list(device_ids) do
     if length(device_ids) > 10 do
@@ -59,7 +50,7 @@ defmodule Shelly.CloudV2 do
   cloud to revert the command later — a watchdog that survives your
   app going down.
   """
-  @spec set_switch(conn(), String.t(), non_neg_integer(), boolean(), keyword()) ::
+  @spec set_switch(Shelly.Client.t(), String.t(), non_neg_integer(), boolean(), keyword()) ::
           :ok | {:error, term()}
   def set_switch(conn, device_id, channel, on?, opts \\ []) when is_boolean(on?) do
     body =
@@ -73,7 +64,7 @@ defmodule Shelly.CloudV2 do
 
   @doc ~S(Control a cover: position is "open" | "close" | "stop" | 0..100.)
   @spec set_cover(
-          conn(),
+          Shelly.Client.t(),
           String.t(),
           non_neg_integer(),
           String.t() | non_neg_integer(),
@@ -89,7 +80,8 @@ defmodule Shelly.CloudV2 do
   end
 
   @doc "Control a light: opts may include :on, :brightness, :temperature, :toggle_after."
-  @spec set_light(conn(), String.t(), non_neg_integer(), keyword()) :: :ok | {:error, term()}
+  @spec set_light(Shelly.Client.t(), String.t(), non_neg_integer(), keyword()) ::
+          :ok | {:error, term()}
   def set_light(conn, device_id, channel, opts \\ []) do
     body =
       opts
@@ -114,7 +106,7 @@ defmodule Shelly.CloudV2 do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp post_json(conn, path, body) do
-    Shelly.RateGate.run(rate_key(conn), fn ->
+    Shelly.RateGate.run(Shelly.Client.rate_key(conn), fn ->
       Shelly.HTTP.request(
         [
           method: :post,
@@ -131,9 +123,6 @@ defmodule Shelly.CloudV2 do
 
   # See `Shelly.Account` — one pacing budget per account, whichever
   # transport is talking.
-  defp rate_key(%{rate_key: key}) when not is_nil(key), do: {:shelly_account, key}
-  defp rate_key(conn), do: {conn.server, conn.auth_key}
-
   defp error({:ok, %{status: status, body: body}}), do: {:error, {:shelly_http, status, body}}
   defp error({:error, reason}), do: {:error, reason}
 end

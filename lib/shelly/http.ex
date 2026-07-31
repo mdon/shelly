@@ -19,6 +19,7 @@ defmodule Shelly.HTTP do
     Keyword.merge(global_options(), per_call_options(source))
   end
 
+  defp per_call_options(%Shelly.Client{req_options: options}) when is_list(options), do: options
   defp per_call_options(%{req_options: options}) when is_list(options), do: options
   defp per_call_options(_source), do: []
 

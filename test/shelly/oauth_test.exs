@@ -46,10 +46,10 @@ defmodule Shelly.OAuthTest do
                  jwt(%{"user_api_url" => "https://shelly-74-eu.shelly.cloud"})
                )
 
-      assert result.access_token == token
+      assert result.token == token
       assert result.refresh_token == "refresh-me"
       assert result.expires_at == DateTime.from_unix!(1_785_307_752)
-      assert result.user_api_url == "https://shelly-74-eu.shelly.cloud"
+      assert result.server == "https://shelly-74-eu.shelly.cloud"
     end
 
     test "a token without a refresh token or exp claim yields nils, not a crash" do
@@ -75,14 +75,15 @@ defmodule Shelly.OAuthTest do
         respond(conn, 200, %{"access_token" => renewed, "refresh_token" => "next-refresh"})
       end)
 
-      account = %{
-        server: "https://shelly-74-eu.shelly.cloud",
-        token: account_token(),
-        refresh_token: "stored-refresh"
-      }
+      account =
+        Shelly.Client.new(
+          server: "https://shelly-74-eu.shelly.cloud",
+          token: account_token(),
+          refresh_token: "stored-refresh"
+        )
 
       assert {:ok, result} = Shelly.OAuth.refresh(account)
-      assert result.access_token == renewed
+      assert result.token == renewed
       assert result.refresh_token == "next-refresh"
       assert result.expires_at == DateTime.from_unix!(1_785_350_952)
     end
@@ -95,7 +96,8 @@ defmodule Shelly.OAuthTest do
         respond(conn, 401, %{"errors" => %{"invalid_token" => "nope"}})
       end)
 
-      account = %{server: "https://shelly-74-eu.shelly.cloud", token: "the-access-token"}
+      account =
+        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: "the-access-token")
 
       assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
     end
@@ -103,7 +105,8 @@ defmodule Shelly.OAuthTest do
     test "a 4xx means the grant is unsupported — callers re-authorize instead of retrying" do
       stub(fn conn -> respond(conn, 400, %{"error" => "unsupported_grant_type"}) end)
 
-      account = %{server: "https://shelly-74-eu.shelly.cloud", token: account_token()}
+      account =
+        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
 
       assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
     end
@@ -111,7 +114,8 @@ defmodule Shelly.OAuthTest do
     test "a 200 that carries no token is not mistaken for success" do
       stub(fn conn -> respond(conn, 200, %{"isok" => true}) end)
 
-      account = %{server: "https://shelly-74-eu.shelly.cloud", token: account_token()}
+      account =
+        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
 
       assert Shelly.OAuth.refresh(account) == {:error, :refresh_unsupported}
     end
@@ -119,14 +123,15 @@ defmodule Shelly.OAuthTest do
     test "server errors surface as-is so callers can retry" do
       stub(fn conn -> respond(conn, 503, %{"error" => "maintenance"}) end)
 
-      account = %{server: "https://shelly-74-eu.shelly.cloud", token: account_token()}
+      account =
+        Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud", token: account_token())
 
       assert {:error, {:oauth_http, 503, _}} = Shelly.OAuth.refresh(account)
     end
 
     test "an account with no token cannot be refreshed" do
-      assert Shelly.OAuth.refresh(%{server: "https://shelly-74-eu.shelly.cloud", token: nil}) ==
-               {:error, :no_token}
+      client = Shelly.Client.new(server: "https://shelly-74-eu.shelly.cloud")
+      assert Shelly.OAuth.refresh(client) == {:error, :no_token}
     end
   end
 end
