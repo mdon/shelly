@@ -1,4 +1,6 @@
 defmodule Shelly.Account do
+  require Logger
+
   @moduledoc """
   Account-level Shelly Cloud API, authorized by an OAuth access token
   (`Authorization: Bearer`) — no per-device auth keys needed.
@@ -35,34 +37,52 @@ defmodule Shelly.Account do
   """
   @spec expand_channels(map()) :: [map()]
   def expand_channels(devices) when is_map(devices) do
-    Enum.flat_map(devices, fn {id, info} ->
-      channels = channel_count(info["channels_count"])
-      base_name = info["name"] || id
-
-      for channel <- 0..(channels - 1) do
-        %{
-          id: String.downcase(id),
-          channel: channel,
-          name: if(channels > 1, do: "#{base_name} · ch#{channel}", else: base_name),
-          model: info["type"],
-          gen: info["gen"],
-          online: info["cloud_online"] == true,
-          raw: info
-        }
-      end
+    Enum.flat_map(devices, fn
+      {id, info} when is_map(info) -> expand_device(id, info)
+      # A malformed entry is one device we can't offer, not a crash.
+      {_id, _info} -> []
     end)
   end
 
-  defp channel_count(count) when is_integer(count) and count > 0, do: count
+  defp expand_device(id, info) do
+    channels = channel_count(info["channels_count"])
+    base_name = info["name"] || id
+
+    for channel <- 0..(channels - 1) do
+      %{
+        id: String.downcase(id),
+        channel: channel,
+        name: if(channels > 1, do: "#{base_name} · ch#{channel}", else: base_name),
+        model: info["type"],
+        gen: info["gen"],
+        online: info["cloud_online"] == true,
+        raw: info
+      }
+    end
+  end
+
+  # Bounded: this arrives from the API, and a nonsense value would
+  # otherwise materialize that many rows.
+  @max_channels 64
+
+  defp channel_count(count) when is_integer(count) and count > 0,
+    do: min(count, @max_channels)
 
   defp channel_count(count) when is_binary(count) do
     case Integer.parse(count) do
-      {value, _} when value > 0 -> value
+      {value, ""} when value > 0 -> min(value, @max_channels)
       _ -> 1
     end
   end
 
   defp channel_count(_count), do: 1
+
+  defp blank_to_nil(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
 
   @doc """
   Status of every device on the account in ONE call (`all_status`).
@@ -81,11 +101,25 @@ defmodule Shelly.Account do
     case post(client, "/device/all_status", show_info: true) do
       {:ok, %{status: 200, body: %{"isok" => true, "data" => %{"devices_status" => statuses}}}}
       when is_map(statuses) ->
-        {:ok, Map.new(statuses, fn {key, st} -> {status_key(key, st), st} end)}
+        {:ok, key_by_device(statuses)}
 
       other ->
         error(other)
     end
+  end
+
+  defp key_by_device(statuses) do
+    Enum.reduce(statuses, %{}, fn {key, status}, acc ->
+      id = status_key(key, status)
+
+      if Map.has_key?(acc, id) do
+        # Two entries claiming one id: keeping the last silently discarded
+        # a device.
+        Logger.warning("Shelly.Account: duplicate device id #{inspect(id)} in all_status")
+      end
+
+      Map.put_new(acc, id, status)
+    end)
   end
 
   defp status_key(outer_key, status) do
@@ -93,11 +127,11 @@ defmodule Shelly.Account do
       case status do
         # An empty id is not an id — fall back rather than collapsing
         # every such entry under "".
-        %{"_dev_info" => %{"id" => id}} when is_binary(id) and id != "" -> id
+        %{"_dev_info" => %{"id" => id}} when is_binary(id) -> blank_to_nil(id) || outer_key
         _ -> outer_key
       end
 
-    String.downcase(id)
+    id |> to_string() |> String.trim() |> String.downcase()
   end
 
   @doc "Switch a relay channel on or off."
@@ -123,7 +157,22 @@ defmodule Shelly.Account do
   """
   @spec parse_status(map(), non_neg_integer()) :: Shelly.Status.t()
   def parse_status(raw_status, channel) when is_map(raw_status) do
-    Shelly.Status.parse(raw_status, channel, online?(raw_status))
+    # Account statuses carry the model and generation inside `_dev_info`,
+    # not at the top level where the RPC parser looks — without this the
+    # recommended path reported model: nil, gen: nil while the legacy
+    # auth-key path reported both.
+    info = raw_status["_dev_info"]
+
+    extra =
+      case info do
+        %{} ->
+          %{model: info["code"], gen: Shelly.Status.gen_to_int(info["gen"])}
+
+        _ ->
+          %{}
+      end
+
+    Shelly.Status.parse(raw_status, channel, online?(raw_status), extra)
   end
 
   # `_dev_info.online` is the cloud's own view and the documented source.
@@ -132,7 +181,9 @@ defmodule Shelly.Account do
   # offline.
   defp online?(%{"_dev_info" => %{"online" => online}}) when is_boolean(online), do: online
   defp online?(%{"_dev_info" => %{"online" => online}}), do: online in [1, "true"]
-  defp online?(status), do: get_in(status, ["cloud", "connected"]) == true
+
+  defp online?(%{"cloud" => cloud}) when is_map(cloud), do: cloud["connected"] == true
+  defp online?(_status), do: false
 
   defp post(%Shelly.Client{} = client, path, form) do
     if Shelly.Client.oauth?(client), do: do_post(client, path, form), else: {:error, :no_token}

@@ -76,6 +76,61 @@ which is now a standing note in `AGENTS.md`.
   silently disabling pacing, and an invalid global `:req_options` is
   logged rather than discarded.
 
+### Fixed (blind review round)
+
+A review run with **no context at all** — no history, no known issues, no
+mention that anything had been reviewed before — found 38 defects that
+three guided rounds and a 178-test suite had not. Its coverage analysis is
+the reason: the suite wasn't thin, it *stopped one case short*. Four
+separate tests enumerated a vocabulary or swept a value range and omitted
+exactly the member that failed.
+
+- **The documented Shelly 2.5 workaround made the bug invisible instead of
+  fixing it.** `extra` merged *after* dispatch, so
+  `extra: %{component: "cover"}` relabelled a relay reading as a cover
+  rather than running the cover parser — an open blind still read closed,
+  now stamped with a component a consumer would trust. The hint now
+  selects the parser, and is ignored (rather than applied as a label) when
+  the payload can't support it.
+- **Adding a header silently removed the `Authorization` header.**
+  `:req_options` is documented as additive, but merging replaced
+  `:headers` wholesale, so one extra header turned every account call into
+  a 401. Headers now append, and options that describe the request itself
+  (`:url`, `:method`, `:form`, `:json`, `:params`) are refused with a
+  warning — they could redirect a control command to another host.
+- **`Shelly.Events` could not be supervised** the way its own moduledoc
+  describes: `use WebSockex` injects a `child_spec/1` shaped for a
+  different `start_link`, so a standard child tuple raised at boot. It now
+  defines its own.
+- **`Account.parse_status/2` raised on a scalar `"cloud"` key** — the
+  third site of an access-chain class the `Events` module carries a
+  comment about, and the one that crashes the caller rather than being
+  swallowed.
+- **A Gen1 battery sensor answered for every channel**, so
+  `has_component?/2` — the documented partial-delta guard — returned true
+  for channel 7 of a flood sensor.
+- **A Gen2 cover reporting `"stopped"` with no position said `on: true`**
+  while the Gen1 path said `nil` for the same words. An uncalibrated cover
+  reports `"stopped"` forever.
+- **The recommended path returned less than the legacy one**:
+  `Account.parse_status/2` reported `model: nil, gen: nil` because account
+  statuses carry those inside `_dev_info`.
+- **Padded credentials were declared usable and sent unchanged** —
+  `Bearer   tok  `. Credentials are trimmed when stored, so "usable" and
+  "what goes on the wire" cannot disagree.
+- `expand_channels/1` raised on a non-map device entry; `channels_count`
+  is bounded (an API value of 100,000 materialized 100,000 rows);
+  colliding device ids are reported rather than silently overwritten;
+  numeric ids no longer vanish from `CloudV2.get_statuses/2`.
+- `set_cover/5` honours the options its `@spec` declares; a handler that
+  throws or exits no longer kills the socket (only `raise` was caught);
+  the socket URL brackets IPv6 hosts, keeps a custom port and URL-encodes
+  the token; Gen1 readings marked `is_valid: false` are not reported as
+  measurements; a stopped `RateGate` degrades to unpaced instead of
+  exiting the caller.
+- Sensor enrichment no longer falls back to channel 0, which gave every
+  channel of a multi-channel device the first channel's temperature.
+
 ### Fixed (second review round)
 
 - **`Shelly.Status.parse/4` is total again.** It is spec'd to return a

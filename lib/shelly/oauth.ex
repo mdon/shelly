@@ -219,13 +219,16 @@ defmodule Shelly.OAuth do
         token: token,
         refresh_token: extract_refresh_token(body) || carried[:refresh_token],
         expires_at: expires_at(claims),
-        label: claims["email"] || claims["user"] || URI.parse(api_url).host
+        # A label the caller set survives a refresh; the claims only fill in
+        # when there is nothing to keep.
+        label: carried[:label] || claims["email"] || claims["user"] || URI.parse(api_url).host
       )
     )
   end
 
   defp carried_over(%Shelly.Client{} = previous) do
     [
+      label: previous.label,
       refresh_token: previous.refresh_token,
       auth_key: previous.auth_key,
       rate_key: previous.rate_key,
@@ -271,7 +274,13 @@ defmodule Shelly.OAuth do
   defp extract_token(%{"data" => %{"access_token" => t}}), do: present(t)
   defp extract_token(_), do: nil
 
-  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
   defp present(_value), do: nil
 
   defp server_from_jwt(code) do

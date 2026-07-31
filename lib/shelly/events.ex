@@ -27,7 +27,7 @@ defmodule Shelly.Events do
 
   Reconnection uses in-process exponential backoff with jitter (a
   WebSockex constraint — the process is unresponsive while it waits)
-  and gives up after #{10} consecutive failures, letting your
+  and gives up after `@max_attempts` consecutive failures, letting your
   supervisor's restart policy take over. Note the access token rides
   the websocket URL (Shelly's protocol); this module never logs the
   URL and redacts disconnect reasons.
@@ -36,6 +36,25 @@ defmodule Shelly.Events do
   use WebSockex
 
   require Logger
+
+  @doc """
+  Child spec for a supervision tree:
+
+      {Shelly.Events, {client, handler: &MyApp.handle_event/1}}
+
+  `use WebSockex` injects a spec shaped for its own `start_link/2`, which
+  does not match this module's `(client, opts)` signature — starting one
+  from a plain `{Shelly.Events, [client, opts]}` tuple raised at boot.
+  """
+  def child_spec({%Shelly.Client{} = client, opts}) do
+    %{
+      id: Keyword.get(opts, :id, __MODULE__),
+      start: {__MODULE__, :start_link, [client, opts]},
+      restart: Keyword.get(opts, :restart, :transient)
+    }
+  end
+
+  def child_spec([%Shelly.Client{} = client, opts]), do: child_spec({client, opts})
 
   @doc """
   Open the realtime socket for a client.
@@ -60,14 +79,19 @@ defmodule Shelly.Events do
   end
 
   defp open_socket(%Shelly.Client{token: token} = client, opts) do
-    handler = Keyword.fetch!(opts, :handler)
+    case Keyword.fetch(opts, :handler) do
+      {:ok, handler} when is_function(handler, 1) -> do_open(client, token, handler, opts)
+      {:ok, invalid} -> {:error, {:invalid_handler, invalid}}
+      :error -> {:error, :no_handler}
+    end
+  end
 
-    host = URI.parse(client.server).host || client.server
-    url = "wss://#{host}:6113/shelly/wss/hk_sock?t=#{token}"
+  defp do_open(client, token, handler, opts) do
+    url = socket_url(client.server, token)
 
     state = %{
       handler: handler,
-      label: host,
+      label: URI.parse(client.server).host || client.server,
       attempt: 0,
       connected_at: nil,
       known_ids: known_ids(opts)
@@ -80,6 +104,26 @@ defmodule Shelly.Events do
       Keyword.take(opts, [:name]) ++ [handle_initial_conn_failure: true]
     )
     |> sanitize_start_error()
+  end
+
+  # Shelly's realtime port. A server on a custom port (a proxy in front of
+  # the cloud) keeps it; otherwise this is where the socket lives.
+  @socket_port 6113
+
+  @doc false
+  # Public for testing: asserting this through start_link/2 would open a
+  # real connection.
+  def socket_url(server, token) do
+    uri = URI.parse(server)
+    host = uri.host || server
+    # URI.parse strips the brackets from an IPv6 host, and without them
+    # the authority re-parses as host "2001" — silently dialling elsewhere.
+    authority = if String.contains?(host, ":"), do: "[#{host}]", else: host
+    port = if uri.port in [nil, 80, 443], do: @socket_port, else: uri.port
+
+    # The token is a JWT, but a persisted one can be anything; an
+    # unencoded "+" arrives as a space and an "&" truncates the query.
+    "wss://#{authority}:#{port}/shelly/wss/hk_sock?t=#{URI.encode_www_form(token)}"
   end
 
   # The connection URL carries the access token (Shelly's protocol), and
@@ -237,7 +281,7 @@ defmodule Shelly.Events do
   defp known_ids(opts) do
     case Keyword.get(opts, :known_ids) do
       nil -> nil
-      ids -> MapSet.new(ids, &to_string/1)
+      ids -> MapSet.new(normalize_known(ids))
     end
   end
 
@@ -259,6 +303,13 @@ defmodule Shelly.Events do
     e ->
       Logger.error(
         "Shelly.Events handler crashed: " <> Exception.format(:error, e, __STACKTRACE__)
+      )
+  catch
+    # A handler that throws or exits used to take the socket with it,
+    # which rescue alone doesn't cover.
+    kind, reason ->
+      Logger.error(
+        "Shelly.Events handler crashed: " <> Exception.format(kind, reason, __STACKTRACE__)
       )
   end
 
@@ -312,8 +363,13 @@ defmodule Shelly.Events do
       decimal_form?(id) ->
         id |> String.to_integer() |> normalize_device_id()
 
-      true ->
+      # Hex ids, and the X-prefixed BLE/Z-Wave form. Anything else is not
+      # an id, and passing it on made it a device nobody could match.
+      valid_id?(id) ->
         String.downcase(id)
+
+      true ->
+        nil
     end
   end
 
@@ -327,6 +383,8 @@ defmodule Shelly.Events do
   end
 
   def normalize_device_id(_), do: nil
+
+  defp valid_id?(id), do: String.match?(id, ~r/^[Xx]?[0-9a-fA-F]+$/)
 
   @doc """
   Normalize against a set of ids you already know.

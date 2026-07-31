@@ -88,10 +88,12 @@ defmodule Shelly.Client do
 
     %__MODULE__{
       server: server,
-      token: Map.get(attrs, :token),
-      refresh_token: Map.get(attrs, :refresh_token),
-      expires_at: Map.get(attrs, :expires_at),
-      auth_key: Map.get(attrs, :auth_key),
+      # Trimmed on the way in: a padded credential passed `usable?` and
+      # then went out on the wire as `Bearer   tok  `.
+      token: credential(Map.get(attrs, :token)),
+      refresh_token: credential(Map.get(attrs, :refresh_token)),
+      expires_at: expires_at(Map.get(attrs, :expires_at)),
+      auth_key: credential(Map.get(attrs, :auth_key)),
       label: Map.get(attrs, :label),
       rate_key: Map.get(attrs, :rate_key),
       req_options: Map.get(attrs, :req_options, [])
@@ -100,7 +102,8 @@ defmodule Shelly.Client do
 
   @doc "Attach (or replace) the never-expiring auth key."
   @spec put_auth_key(t(), String.t() | nil) :: t()
-  def put_auth_key(%__MODULE__{} = client, auth_key), do: %{client | auth_key: auth_key}
+  def put_auth_key(%__MODULE__{} = client, auth_key),
+    do: %{client | auth_key: credential(auth_key)}
 
   @doc "Attach a stable pacing key — see the rate-limiting note above."
   @spec put_rate_key(t(), term()) :: t()
@@ -108,8 +111,13 @@ defmodule Shelly.Client do
 
   @doc "Merge extra Req options (proxy, timeouts, a `:plug` stub)."
   @spec put_req_options(t(), keyword()) :: t()
-  def put_req_options(%__MODULE__{} = client, options) when is_list(options),
-    do: %{client | req_options: Keyword.merge(client.req_options, options)}
+  def put_req_options(%__MODULE__{} = client, options) do
+    unless Keyword.keyword?(options) do
+      raise ArgumentError, ":req_options must be a keyword list, got: #{inspect(options)}"
+    end
+
+    %{client | req_options: Keyword.merge(client.req_options, options)}
+  end
 
   @doc "Can this client use the OAuth paths (account API, websocket)?"
   @spec oauth?(t()) :: boolean()
@@ -134,14 +142,16 @@ defmodule Shelly.Client do
   when you store the token.
   """
   @spec token_expired?(t()) :: boolean()
-  def token_expired?(%__MODULE__{token: token}) when not is_binary(token), do: true
-  def token_expired?(%__MODULE__{token: token}) when byte_size(token) == 0, do: true
-
-  def token_expired?(%__MODULE__{expires_at: nil} = client),
-    do: not usable_credential?(client.token)
-
-  def token_expired?(%__MODULE__{expires_at: expires_at}),
-    do: DateTime.compare(expires_at, DateTime.utc_now()) != :gt
+  def token_expired?(%__MODULE__{} = client) do
+    cond do
+      # Must agree with oauth?/1: a token this client would refuse to send
+      # cannot be "not expired", or the documented routing picks the path
+      # that then answers {:error, :no_token}.
+      not usable_credential?(client.token) -> true
+      is_nil(client.expires_at) -> false
+      true -> DateTime.compare(client.expires_at, DateTime.utc_now()) != :gt
+    end
+  end
 
   @doc "Seconds until the token expires (negative once it has), or `nil`."
   @spec expires_in(t()) :: integer() | nil
@@ -165,6 +175,25 @@ defmodule Shelly.Client do
   # a mis-trimmed environment variable or a copy-pasted key looks like.
   defp usable_credential?(value) when is_binary(value), do: String.trim(value) != ""
   defp usable_credential?(_value), do: false
+
+  # Stored trimmed, or not stored at all — so "usable" and "what is sent"
+  # can never disagree.
+  defp credential(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp credential(_value), do: nil
+
+  defp expires_at(nil), do: nil
+  defp expires_at(%DateTime{} = at), do: at
+
+  defp expires_at(other) do
+    raise ArgumentError,
+          "Shelly.Client :expires_at must be a DateTime or nil, got: #{inspect(other)}"
+  end
 
   defp normalize_server(server) when is_binary(server) do
     uri = URI.parse(if String.contains?(server, "://"), do: server, else: "https://" <> server)

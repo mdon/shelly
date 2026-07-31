@@ -28,7 +28,7 @@ defmodule Shelly.CloudV1 do
          body: %{"isok" => true, "data" => %{"device_status" => device_status} = data}
        }}
       when is_map(device_status) ->
-        {:ok, {device_status, data["online"] == true}}
+        {:ok, {device_status, data["online"] in [true, 1, "true"]}}
 
       # Falling back to the wrapper here handed callers a map that parses
       # as "unknown" and `on: false` — a device that looks permanently off.

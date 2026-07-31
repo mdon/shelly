@@ -75,26 +75,35 @@ defmodule Shelly.Status do
   @spec parse(map() | term(), non_neg_integer(), boolean(), map()) :: t()
   def parse(status, channel, online, extra \\ %{})
 
-  def parse(status, channel, online, extra) when is_map(status) do
+  def parse(status, channel, online, extra) when is_map(status) and is_map(extra) do
     base =
-      case component_tag(status, channel) do
+      case forced_tag(extra, status, channel) || component_tag(status, channel) do
         nil -> unknown_status(status, online)
         tag -> parse_tagged(tag, status, channel, online)
       end
 
     base
     |> enrich(status, channel)
-    |> Map.merge(extra, fn _k, parsed, from_extra ->
+    # `:component` steered the dispatch above; merging it as a value too
+    # would relabel a status when the hint matched nothing, which is the
+    # confidently-wrong answer this option exists to avoid.
+    |> Map.merge(Map.delete(extra, :component), fn _k, parsed, from_extra ->
       if is_nil(from_extra), do: parsed, else: from_extra
     end)
   end
 
-  def parse(_status, _channel, online, extra) do
+  # A non-map `extra` is a caller mistake, not a reason to raise.
+  def parse(status, channel, online, _extra) when is_map(status),
+    do: parse(status, channel, online, %{})
+
+  def parse(_status, _channel, online, extra) when is_map(extra) do
     unknown_status(%{}, online)
     |> Map.merge(extra, fn _k, parsed, from_extra ->
       if is_nil(from_extra), do: parsed, else: from_extra
     end)
   end
+
+  def parse(_status, _channel, online, _extra), do: unknown_status(%{}, online)
 
   @doc """
   Does this payload carry actual data for the device's channel?
@@ -190,9 +199,12 @@ defmodule Shelly.Status do
   end
 
   defp gen1_tag(status, channel) do
+    # Gen1 battery sensors are single-channel devices; answering for
+    # every channel made has_component?/2 useless for them.
     Enum.find_value(@gen1_arrays, fn {key, tag, _component} ->
       if gen1_channel_present?(status[key], channel), do: tag
-    end) || if gen1_sensor?(status), do: :gen1_sensor
+    end) ||
+      if channel == 0 and gen1_sensor?(status), do: :gen1_sensor
   end
 
   defp tag_component(:light_family, _status), do: "light"
@@ -248,7 +260,9 @@ defmodule Shelly.Status do
   defp parse_tagged(:gen1_sensor, status, _channel, online),
     do: parse_gen1_sensor(status, online)
 
-  defp gen1_channel_present?(list, channel) when is_list(list), do: length(list) > channel
+  defp gen1_channel_present?(list, channel) when is_list(list) and channel >= 0,
+    do: length(list) > channel
+
   defp gen1_channel_present?(_, _), do: false
 
   @doc ~S|Normalize the v2 API's gen strings ("G1".."G4") to integers.|
@@ -262,6 +276,59 @@ defmodule Shelly.Status do
 
   def gen_to_int(n) when is_integer(n), do: n
   def gen_to_int(_), do: nil
+
+  # A caller who knows what the device is — a Shelly 2.5 in roller mode
+  # reports `relays` AND `rollers` with no in-payload signal of its mode —
+  # can say so with `extra: %{component: "cover"}`. This selects the
+  # parser; merging `extra` afterwards only ever relabelled the answer,
+  # so the documented workaround produced an open blind still reported as
+  # closed, now stamped "cover" and therefore believed.
+  defp forced_tag(extra, status, channel) do
+    case Map.get(extra, :component) do
+      nil -> nil
+      component -> matching_tag(component, status, channel)
+    end
+  end
+
+  defp matching_tag(component, status, channel) do
+    forced_candidates()
+    |> Enum.filter(fn {name, _tag} -> name == component end)
+    |> Enum.find_value(fn {_name, tag} -> if tag_applies?(tag, status, channel), do: tag end)
+  end
+
+  defp forced_candidates do
+    [
+      {"cover", :gen1_roller},
+      {"cover", :cover},
+      {"relay", :gen1_relay},
+      {"switch", :switch},
+      {"light", :gen1_light},
+      {"light", :light},
+      {"em", :gen1_emeter},
+      {"em", :em1},
+      {"em", :em}
+    ]
+  end
+
+  defp tag_applies?(:gen1_roller, status, channel),
+    do: gen1_channel_present?(status["rollers"], channel)
+
+  defp tag_applies?(:gen1_relay, status, channel),
+    do: gen1_channel_present?(status["relays"], channel)
+
+  defp tag_applies?(:gen1_light, status, channel),
+    do: gen1_channel_present?(status["lights"], channel)
+
+  defp tag_applies?(:gen1_emeter, status, channel),
+    do: gen1_channel_present?(status["emeters"], channel)
+
+  defp tag_applies?(:em, status, channel), do: channel == 0 and is_map(status["em:0"])
+
+  defp tag_applies?(tag, status, channel) do
+    Enum.any?(@rpc_components, fn {prefix, candidate, _component} ->
+      candidate == tag and is_map(status["#{prefix}:#{channel}"])
+    end)
+  end
 
   ## Total accessors ------------------------------------------------------
   #
@@ -428,9 +495,13 @@ defmodule Shelly.Status do
 
       _ ->
         case cover["state"] do
-          nil -> nil
-          "closed" -> false
-          _ -> true
+          "open" -> true
+          "opening" -> true
+          "closing" -> true
+          state when state in ["closed", "close"] -> false
+          # "stopped"/"calibrating" describe the motor, not the blind —
+          # and an uncalibrated cover says "stopped" forever.
+          _ -> nil
         end
     end
   end
@@ -500,14 +571,24 @@ defmodule Shelly.Status do
 
   # The original Shelly 2 drives two relays through a single meter, so a
   # lone meter covers whichever channel asked for it.
+  # Gen1 devices mark a reading they could not take with is_valid: false;
+  # reporting it as a measurement claims data that was never collected.
+  defp valid_reading?(%{"is_valid" => false}), do: false
+  defp valid_reading?(_reading), do: true
+
   defp gen1_meter(meters, channel) when is_list(meters) do
     case Enum.at(meters, channel) do
-      nil -> if length(meters) == 1, do: as_map(List.first(meters))
-      meter -> as_map(meter)
+      nil -> if length(meters) == 1, do: valid_meter(List.first(meters))
+      meter -> valid_meter(meter)
     end
   end
 
   defp gen1_meter(_meters, _channel), do: nil
+
+  defp valid_meter(meter) do
+    meter = as_map(meter)
+    if valid_reading?(meter), do: meter, else: %{}
+  end
 
   # Gen1 rollers report "open" | "close" | "stop"; when calibrated,
   # current_pos (0..100) is the reliable openness signal.
@@ -521,6 +602,16 @@ defmodule Shelly.Status do
   # confident `false` here made the generations contradict each other.
   defp roller_open?(_roller), do: nil
 
+  defp gen1_temperature(status) do
+    tmp = as_map(status["tmp"])
+
+    if valid_reading?(tmp) do
+      opt_float(tmp["tC"] || tmp["value"] || numeric(status["temperature"]))
+    else
+      nil
+    end
+  end
+
   defp gen1_common(status, channel, online) do
     wifi = as_map(status["wifi_sta"])
     input = at(status["inputs"], channel)
@@ -532,7 +623,7 @@ defmodule Shelly.Status do
       voltage: opt_float(status["voltage"]),
       current: nil,
       energy_wh: nil,
-      temp_c: opt_float(dig(status, ["tmp", "tC"]) || numeric(status["temperature"])),
+      temp_c: gen1_temperature(status),
       rssi: opt_int(wifi["rssi"]),
       input_state: gen1_input(input["input"]),
       source: nil,
@@ -635,6 +726,7 @@ defmodule Shelly.Status do
         is_boolean(status["flood"]) -> status["flood"]
         is_boolean(status["smoke"]) -> status["smoke"]
         is_boolean(status["motion"]) -> status["motion"]
+        is_boolean(dig(status, ["sensor", "motion"])) -> dig(status, ["sensor", "motion"])
         # Door/Window reports state under `sensor`. Without this an open
         # door read as closed, because the catch-all said false.
         is_map(status["sensor"]) -> gen1_contact_open?(status["sensor"])
@@ -650,12 +742,14 @@ defmodule Shelly.Status do
       is_boolean(status["flood"]) -> "flood"
       is_boolean(status["smoke"]) -> "smoke"
       is_boolean(status["motion"]) -> "presence"
+      is_boolean(dig(status, ["sensor", "motion"])) -> "presence"
       true -> "sensor"
     end
   end
 
   # Door/Window: `state` is "open"/"close", older units report `is_valid`
   # alongside. Anything unrecognized stays unknown rather than "closed".
+  defp gen1_contact_open?(%{"is_valid" => false}), do: nil
   defp gen1_contact_open?(%{"state" => "open"}), do: true
   defp gen1_contact_open?(%{"state" => state}) when state in ["close", "closed"], do: false
   defp gen1_contact_open?(_sensor), do: nil
@@ -669,15 +763,17 @@ defmodule Shelly.Status do
         opt_int(dig(status, ["devicepower:0", "battery", "percent"])) ||
         opt_int(dig(status, ["bat", "value"]))
 
+    # Only this channel's readings, plus the device-wide Gen1 ones. Falling
+    # back to channel 0 gave every channel of a multi-channel device the
+    # first channel's temperature as its own.
     temp =
       parsed[:temp_c] ||
         opt_float(dig(status, ["temperature:#{channel}", "tC"])) ||
-        opt_float(dig(status, ["temperature:0", "tC"])) ||
-        opt_float(dig(status, ["tmp", "tC"]))
+        opt_float(dig(status, ["tmp", "tC"])) ||
+        opt_float(dig(status, ["tmp", "value"]))
 
     humidity =
       opt_float(dig(status, ["humidity:#{channel}", "rh"])) ||
-        opt_float(dig(status, ["humidity:0", "rh"])) ||
         opt_float(dig(status, ["hum", "value"]))
 
     parsed

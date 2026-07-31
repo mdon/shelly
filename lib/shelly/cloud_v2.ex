@@ -26,10 +26,10 @@ defmodule Shelly.CloudV2 do
   @spec get_statuses(Shelly.Client.t(), [String.t()]) ::
           {:ok, %{optional(String.t()) => map()}} | {:error, term()}
   def get_statuses(conn, device_ids) when is_list(device_ids) do
-    if length(device_ids) > 10 do
-      {:error, :too_many_ids}
-    else
-      do_get_statuses(conn, device_ids)
+    cond do
+      device_ids == [] -> {:ok, %{}}
+      length(device_ids) > 10 -> {:error, :too_many_ids}
+      true -> do_get_statuses(conn, device_ids)
     end
   end
 
@@ -80,8 +80,10 @@ defmodule Shelly.CloudV2 do
           keyword()
         ) ::
           :ok | {:error, term()}
-  def set_cover(conn, device_id, channel, position, _opts \\ []) do
-    body = %{id: device_id, channel: channel, position: position}
+  def set_cover(conn, device_id, channel, position, opts \\ []) do
+    body =
+      %{id: device_id, channel: channel, position: position}
+      |> maybe_put(:toggle_after, Keyword.get(opts, :toggle_after))
 
     conn
     |> post_json("/v2/devices/api/set/cover", body)
@@ -117,6 +119,11 @@ defmodule Shelly.CloudV2 do
       trimmed -> String.downcase(trimmed)
     end
   end
+
+  # Numeric ids appear on virtual devices, and dropping them lost the
+  # device with no error at all.
+  defp element_id(%{"id" => id}) when is_integer(id),
+    do: Shelly.Events.normalize_device_id(id)
 
   defp element_id(_element), do: nil
 

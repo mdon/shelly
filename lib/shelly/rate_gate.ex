@@ -55,6 +55,12 @@ defmodule Shelly.RateGate do
       {:error, :throttled} ->
         {:error, :throttled}
     end
+  catch
+    # The gate can stop between the lookup and the call. Unpaced is the
+    # documented behaviour when it isn't running; exiting the caller's
+    # process is not.
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
+      fun.()
   end
 
   @impl true

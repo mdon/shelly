@@ -13,8 +13,29 @@ defmodule Shelly.HTTP do
   # proxy, set their own timeouts, or stub them in tests — which is
   # exactly why those three modules had no HTTP-level test coverage.
 
+  # Options the library computes from the request itself. A caller's
+  # :req_options must not replace these: overriding :headers dropped the
+  # Authorization header (documented as additive), and :url or :method
+  # could redirect a control command to another host.
+  @reserved [:method, :url, :form, :json, :params]
+
   def request(base_options, source \\ %{}) do
-    Req.request(Keyword.merge(base_options, options_from(source)))
+    caller = options_from(source)
+    {headers, caller} = Keyword.pop(caller, :headers, [])
+
+    {conflicting, caller} = Keyword.split(caller, @reserved)
+
+    if conflicting != [] do
+      Logger.warning(
+        "Shelly: ignoring :req_options #{inspect(Keyword.keys(conflicting))} — these describe " <>
+          "the request itself and are set by the library"
+      )
+    end
+
+    base_options
+    |> Keyword.update(:headers, headers, &(&1 ++ headers))
+    |> Keyword.merge(caller)
+    |> Req.request()
   end
 
   defp options_from(source) do
@@ -25,7 +46,18 @@ defmodule Shelly.HTTP do
   defp per_call_options(%{req_options: options}), do: validate(options)
   defp per_call_options(_source), do: []
 
-  defp validate(options) when is_list(options), do: options
+  defp validate(options) when is_list(options) do
+    if Keyword.keyword?(options) do
+      options
+    else
+      Logger.warning(
+        "Shelly: :req_options must be a keyword list, got a list with non-option elements: " <>
+          inspect(options)
+      )
+
+      []
+    end
+  end
 
   defp validate(invalid) do
     Logger.warning(
